@@ -365,6 +365,7 @@ class PatternEditorDialog(wx.Dialog):
         self._fill_spill = False
         self._undo: list = []   # (what, snapshot) pairs; Ctrl+Z / Ctrl+Y
         self._redo: list = []
+        self._feel_run = False  # mid a coalesced swing/humanize slider sweep (one undo entry)
         self._pitch_cache: dict = {}   # (id, kit, sample) -> estimated base Pitch
         self._line_kit = build_line_kit(self.lines, self._kits_dir, base_kit=self._base_kit)
 
@@ -1320,9 +1321,15 @@ class PatternEditorDialog(wx.Dialog):
         # slider's accessible name; a live audition restarts to reflect the new feel.
         # Make feel undoable like every other edit, but coalesce a whole slider sweep into
         # one entry (each arrow step fires an event) so it can't flood the undo stack — and
-        # so Ctrl+Z can't silently revert feel just because it wasn't snapshotted.
-        if not (self._undo and self._undo[-1][0] == "feel change"):
-            self._push_undo("feel change")
+        # so Ctrl+Z can't silently revert feel just because it wasn't snapshotted.  A dedicated
+        # run flag (not the stack-top label) drives this: keying on "top of undo is a feel
+        # entry" would wrongly coalesce onto a STALE feel entry left on top after an undo, and
+        # then skip clearing redo — losing the edit to a phantom Ctrl+Y.  _feel_run is cleared
+        # by every other mutation and by undo/redo, so each fresh sweep snapshots and clears
+        # redo exactly once.
+        if not self._feel_run:
+            self._push_undo("feel change")   # snapshots the pre-sweep feel and clears redo
+        self._feel_run = True
         self.pattern.swing = self.swing_slider.GetValue() / 100.0
         self.pattern.humanize = self.humanize_slider.GetValue() / 100.0
         self._sync_feel_labels()
@@ -1353,6 +1360,7 @@ class PatternEditorDialog(wx.Dialog):
         if len(self._undo) > self._UNDO_DEPTH:
             self._undo.pop(0)
         self._redo.clear()
+        self._feel_run = False   # any explicit mutation ends a feel sweep (_on_feel re-sets it)
 
     def _restore(self, snap) -> None:
         self.pattern, self.lines, self.silenced = snap
@@ -1370,6 +1378,7 @@ class PatternEditorDialog(wx.Dialog):
         what, snap = self._undo.pop()
         self._redo.append((what, self._snapshot()))
         self._restore(snap)
+        self._feel_run = False   # a feel edit after an undo starts its own entry
         speech.speak(f"Undone: {what}.")
 
     def _redo_last(self) -> None:
@@ -1379,6 +1388,7 @@ class PatternEditorDialog(wx.Dialog):
         what, snap = self._redo.pop()
         self._undo.append((what, self._snapshot()))
         self._restore(snap)
+        self._feel_run = False   # a feel edit after a redo starts its own entry
         speech.speak(f"Redone: {what}.")
 
     def _on_save(self, event: wx.CommandEvent) -> None:
@@ -2944,8 +2954,12 @@ class SongBeatEditorDialog(wx.Dialog):
         wx.CallAfter(self.grid_list.SetFocus)
         if self._unresolved:            # tell the user; they're kept, just not editable here
             n = self._unresolved
-            speech.speak(f"{n} section{'s' if n != 1 else ''} can't be edited here "
-                         f"(their groove is missing) but stay in the song. ")
+            msg = (f"{n} section{'s' if n != 1 else ''} can't be edited here "
+                   f"(their groove is missing) but stay in the song. ")
+            # Queue AFTER the SetFocus CallAfter (FIFO) and DON'T interrupt, so NVDA's own
+            # dialog/focus announcement runs first and this follows it instead of being cut
+            # off — speaking it now (interrupt=True, before focus) would truncate it.
+            wx.CallAfter(speech.speak, msg, interrupt=False)
 
     # -- model ----------------------------------------------------------------
 

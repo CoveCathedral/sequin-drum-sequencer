@@ -93,6 +93,50 @@ def test_song_builder_opens_and_adds_a_section(frame):
         dlg.Destroy()
 
 
+def test_feel_edit_after_undo_clears_stale_redo(frame):
+    # Regression: coalescing feel edits must not leave a stale redo entry that Ctrl+Y would
+    # replay over the change (the earlier stack-top heuristic did; the run flag fixes it).
+    d = frame.drums
+    dlg = PatternEditorDialog(d, d._pattern.copy(), d._current_lines(), d._kits_dir(),
+                              set(), d.player, d.bpm, dark=True, settings=d._settings)
+    try:
+        dlg.swing_slider.SetValue(30)          # a feel sweep -> one undo entry, redo cleared
+        dlg._on_feel(None)
+        assert dlg.pattern.swing == pytest.approx(0.3)
+        dlg.grid_list.SetSelection(0)          # a non-feel edit
+        dlg._cursor = 2
+        dlg._toggle_hit()
+        dlg._undo_last()                        # undo the hit -> it becomes redoable
+        assert dlg._redo, "the undone hit should be on the redo stack"
+        dlg.swing_slider.SetValue(50)          # a fresh feel edit must invalidate that redo
+        dlg._on_feel(None)
+        assert dlg.pattern.swing == pytest.approx(0.5)
+        assert not dlg._redo, "a new feel edit must clear redo (no phantom Ctrl+Y replay)"
+    finally:
+        dlg.Destroy()
+
+
+def test_beat_editor_unresolved_warning_does_not_interrupt_focus(frame, monkeypatch):
+    # Regression: the "N sections can't be edited here" warning must be spoken via CallAfter
+    # with interrupt=False, so NVDA's dialog/focus announcement isn't cut off mid-word.
+    from sequin.ui import speech
+    calls = []
+    monkeypatch.setattr(speech, "speak",
+                        lambda text, interrupt=True: calls.append((text, interrupt)))
+    d = frame.drums
+    dlg = SongBeatEditorDialog(
+        d, d, [{"pattern": "Rock", "repeats": 1},
+               {"pattern": "NoSuchGroove_zzz", "repeats": 1}], dark=True)
+    try:
+        wx.Yield()                              # let the CallAfter'd warning fire
+        warnings = [c for c in calls if "can't be edited here" in c[0]]
+        assert warnings, "an unresolvable section should trigger a spoken warning"
+        assert warnings[0][1] is False, "the warning must not interrupt the focus announcement"
+    finally:
+        dlg._stop()
+        dlg.Destroy()
+
+
 def test_beat_editor_keeps_unresolvable_sections_and_per_section_feel(frame):
     # Regression for two audit fixes: (#14) the audition resolves each section's own tempo
     # and swing, and (#4) Save rebuilds the whole song in order — a section whose groove is
