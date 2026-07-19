@@ -197,11 +197,10 @@ def test_shared_file_import_keeps_chances_ornaments_and_feel():
     assert p2.swing == 0.5 and p2.humanize == 0.2
 
 
-def test_song_store_resolve_save_load(tmp_path, monkeypatch):
-    import firehawk.config as config
-    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "s.json")
-    from firehawk.config import AppSettings
-    s = AppSettings()
+def test_song_store_resolve_save_load(tmp_path):
+    # Sequin's own settings store — this suite must not need FreedomHawk installed to run.
+    from sequin.config import AppSettings
+    s = AppSettings(path=tmp_path / "s.json")
     # resolve a built-in groove by name; missing -> None
     assert ps.resolve_pattern_by_name("Rock", s).name == "Rock"
     assert ps.resolve_pattern_by_name("Nope!!", s) is None
