@@ -732,8 +732,12 @@ def test_swing_delays_offbeat_not_downbeat():
 
 def test_swing_default_matches_straight():
     kit = drums.synth_kit()
-    p = drums.GENRE_PATTERNS[0]
-    assert drums.render_loop(p, kit, 120) == drums.render_loop(p, kit, 120, swing=0.0)
+    p = drums.GENRE_PATTERNS[0]          # Rock — straight (swing 0)
+    # Humanize is pinned off on BOTH sides: the genre feel gives Rock a little humanize, and
+    # humanize deliberately drifts every render, so leaving it on would compare two
+    # intentionally-different mixes. This isolates the thing under test — the swing default.
+    assert (drums.render_loop(p, kit, 120, humanize=0.0)
+            == drums.render_loop(p, kit, 120, swing=0.0, humanize=0.0))
 
 
 def test_render_loop_inherits_the_patterns_own_feel():
@@ -965,3 +969,68 @@ def test_load_kit_borrows_parts_from_sibling_kits(tmp_path):
     kit = drums.load_kit_from_folder(tmp_path / "Kit A",
                                      choices={"kick": "Kit Gone/x.wav"})
     assert len(kit.voice("kick")) == 1000
+
+
+# -- genre feel (swing / humanize / ornaments / chance / polymeter) ----------------
+
+def _lib_genres():
+    return {drums._genre_of(p.name) for p in drums.PATTERN_LIBRARY}
+
+
+def test_every_library_genre_has_a_feel_profile():
+    # A genre with no profile silently ships flat, which is how the whole library ended up
+    # with zero swing/ornaments/chance in the first place.
+    assert not (_lib_genres() - set(drums.GENRE_FEEL))
+
+
+def test_feel_is_idiomatic_not_blanket():
+    by_name = {p.name: p for p in drums.PATTERN_LIBRARY}
+    # Swung styles actually swing...
+    for n in ("Jazz Swing", "Blues Shuffle", "Boom Bap", "UK Garage"):
+        assert by_name[n].swing > 0.3, n
+    # ...and straight ones stay straight. Swinging these would be musically wrong.
+    for n in ("Rock", "Metal", "Blast Beat", "Techno", "Motorik", "Four on the Floor"):
+        assert by_name[n].swing == 0.0, n
+    # Programmed styles stay machine-tight; live styles breathe.
+    assert by_name["Techno"].humanize == 0.0
+    assert by_name["Trap"].humanize == 0.0
+    assert by_name["Grunge"].humanize > 0.1
+    # Compound meters are already triplet-based — swinging them again double-swings.
+    for n in ("6/8", "9/8", "Gospel 6/8"):
+        assert by_name[n].swing == 0.0, n
+
+
+def test_feel_never_touches_the_backbone():
+    """Chance/ornaments on the downbeat kick or backbeat snare would stop it being a groove."""
+    for p in drums.PATTERN_LIBRARY:
+        beat = max(1, round(p.steps_per_beat * 4.0 / max(1, p.beat_unit)))
+        per_bar = max(1, p.steps // max(1, p.bars))
+        for s in p.hits.get("kick", []):
+            if s % per_bar == 0:
+                assert p.chance_of("kick", s) is None, (p.name, s)
+                assert p.ornament_of("kick", s) is None, (p.name, s)
+        for s in p.hits.get("snare", []):
+            if s % beat == 0:
+                assert p.chance_of("snare", s) is None, (p.name, s)
+
+
+def test_ornaments_are_sparse_not_on_every_backbeat():
+    # A drag on all of 2 and 4 reads as a rudimental march, not as a player's choice.
+    marchy = [p for p in drums.PATTERN_LIBRARY if drums._genre_of(p.name) == "March"]
+    assert marchy
+    beat = max(1, round(marchy[0].steps_per_beat * 4.0 / max(1, marchy[0].beat_unit)))
+    ornamented = total = 0
+    for p in marchy:
+        for s in p.hits.get("snare", []):
+            if s % beat == 0:
+                total += 1
+                ornamented += p.ornament_of("snare", s) is not None
+    assert total and ornamented < total          # some, never all
+
+
+def test_library_feel_is_deterministic():
+    """Pattern 137 must be pattern 137 forever, feel included."""
+    def sig(lib):
+        return [(p.name, p.swing, p.humanize, {r: dict(v) for r, v in p.probs.items()},
+                 {r: dict(v) for r, v in p.ornaments.items()}, dict(p.lengths)) for p in lib]
+    assert sig(drums.build_pattern_library()) == sig(drums.build_pattern_library())

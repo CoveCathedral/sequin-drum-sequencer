@@ -924,7 +924,160 @@ def _bake_default_dynamics(p: Pattern) -> Pattern:
     return p
 
 
-GENRE_PATTERNS = [_bake_default_dynamics(p) for p in GENRE_PATTERNS]
+# -- genre feel: swing / humanize / ornaments / chance / polymeter -----------------
+#
+# These grooves are a REFERENCE library — a starting point that should be *correct* for its
+# style — so this table is idiomatic, not a demo reel.  Straight styles stay straight
+# (swing 0), programmed styles stay machine-tight (humanize 0), and ornaments are placed
+# SPARSELY rather than on every backbeat: a drag on all of 2 and 4 reads as a rudimental
+# march, not as jazz.
+#
+# SWING SCALE — read this before changing a number.  Swing feeds _swung_fraction, where
+#   r = 0.5 + 0.25 * swing   (r = the fraction of the beat the first eighth takes)
+# so the curve is:
+#   0.00 -> 50/50  dead straight
+#   0.16 -> 54/46  a light MPC/909 lean
+#   0.40 -> 60/40  a medium laid-back shuffle
+#   0.67 -> 66/33  a true triplet swing (jazz / blues shuffle)
+#   0.80 -> 70/30  a hard shuffle
+# It is NOT a scale where 50 means "neutral" — 0 is neutral.
+#
+# Compound meters (6/8, 9/8, Gospel 6/8) stay at swing 0: their subdivision is already
+# triplet-based, so swinging them again would double-swing the feel.
+
+
+def _feel(swing=0.0, hum=0.10, orn=None, roll=0.0, hat=0, perc=0, poly=None) -> dict:
+    return {"swing": swing, "humanize": hum, "snare_orn": orn,
+            "hat_roll": roll, "hat_chance": hat, "perc_chance": perc, "poly": poly}
+
+
+GENRE_FEEL: dict[str, dict] = {
+    # --- rock & pop: straight, played by arms rather than a grid ---
+    "Rock": _feel(hum=0.14),
+    "Pop": _feel(hum=0.06, perc=55),          # quantized; only the sweeteners come and go
+    "Four on the Floor": _feel(hum=0.05),
+    "Half-Time": _feel(hum=0.12, orn="flam"),  # one huge backbeat, flammed for size
+    "Hard Rock": _feel(hum=0.12),
+    "Punk": _feel(hum=0.08),
+    "Grunge": _feel(hum=0.20, orn="flam"),
+    "Motorik": _feel(hum=0.04),               # hypnotic *because* it never varies
+    "Surf": _feel(hum=0.15),
+    "Ballad": _feel(hum=0.18),
+    # --- metal: rigidly straight, click-locked ---
+    "Metal": _feel(hum=0.08),
+    "Thrash Gallop": _feel(hum=0.06),         # a duple 8th+two-16ths figure; swing kills it
+    "Blast Beat": _feel(hum=0.04),
+    "D-Beat": _feel(hum=0.15),
+    "Breakdown": _feel(hum=0.05, orn="flam"),
+    "Doom": _feel(hum=0.20),
+    # No poly here: the seed is ALREADY a 7/16 bar, so a 7-step kick would equal the whole
+    # pattern and phase against nothing.  Afrobeat (12-step perc under 16) is the polymeter
+    # showcase instead, where the cycle genuinely runs against the kit.
+    "Djent 7/16 (poly)": _feel(hum=0.04),
+    # --- funk, soul, disco ---
+    "Funk": _feel(swing=0.16, hum=0.16, hat=75, perc=55),
+    "Motown": _feel(swing=0.14, hum=0.18, hat=60),
+    "Second Line": _feel(swing=0.55, hum=0.24, orn="drag", hat=65, perc=70),
+    "Boogaloo": _feel(hum=0.15, hat=55, perc=75),   # straight-8th cha-cha, not a shuffle
+    "Nu-Disco": _feel(hum=0.06, perc=50),
+    # --- hip-hop, trap, r&b ---
+    "Hip-Hop": _feel(swing=0.18, hum=0.12),
+    "Trap": _feel(hum=0.0, roll=0.40),        # on-grid; rolls punctuate, they don't dominate
+    "Boom Bap": _feel(swing=0.40, hum=0.18),  # the MPC ~60% lean
+    "Drill": _feel(hum=0.04, roll=0.50),
+    "Lo-Fi": _feel(swing=0.48, hum=0.28),     # deliberately un-quantized, Dilla sway
+    "R&B": _feel(swing=0.20, hum=0.15),
+    "Trip-Hop": _feel(swing=0.24, hum=0.20),
+    "Reggaeton": _feel(swing=0.14, hum=0.08, perc=55),   # dembow leans, it isn't machine-flat
+    # --- electronic: programmed, so humanize stays at zero ---
+    "House": _feel(swing=0.18, hum=0.06, perc=70),
+    "Techno": _feel(hum=0.0, perc=50),
+    "Trance": _feel(hum=0.0, perc=45),
+    "Drum and Bass": _feel(hum=0.10, hat=70, perc=60),   # feel lives in ghost notes, not swing
+    "Dubstep": _feel(hum=0.0, hat=60, perc=50),
+    "Breakbeat": _feel(swing=0.28, hum=0.14, hat=65, perc=60),
+    "UK Garage": _feel(swing=0.55, hum=0.08, hat=70, perc=65),   # the shuffle IS the genre
+    # --- latin & world ---
+    "Bossa Nova": _feel(hum=0.14),
+    "Samba": _feel(swing=0.20, hum=0.18, perc=80),   # the bateria is timekeeping, not garnish
+    "Afrobeat": _feel(swing=0.20, hum=0.20, hat=70, perc=85, poly={"perc": 12}),
+    "Reggae One Drop": _feel(hum=0.18),
+    "Ska": _feel(swing=0.25, hum=0.18),
+    "Soca": _feel(hum=0.10, perc=60),
+    # --- jazz & blues: the genuinely swung styles ---
+    "Jazz Swing": _feel(swing=0.66, hum=0.20),
+    "Blues Shuffle": _feel(swing=0.66, hum=0.16),
+    "Jazz Waltz": _feel(swing=0.62, hum=0.20),
+    "Gospel 6/8": _feel(hum=0.18, orn="flam", perc=60),   # compound already: no added swing
+    "Country Train": _feel(hum=0.14),
+    # --- traditional & odd meters: the odd count is the hook; keep them clean ---
+    "Waltz": _feel(hum=0.16),
+    "March": _feel(hum=0.08, orn="drag"),     # rudimental ruff is authentic here
+    "Polka": _feel(hum=0.14),
+    "5/4": _feel(hum=0.12, hat=60),
+    "7/8 (2+2+3)": _feel(hum=0.12),
+    "6/8": _feel(hum=0.16),
+    "5/8 (3+2)": _feel(hum=0.14),
+    "9/8": _feel(hum=0.14),
+    "7/4": _feel(hum=0.12, hat=65, perc=60),
+    "11/8 (3+3+3+2)": _feel(hum=0.12),
+    "5/4 Fast": _feel(hum=0.10),
+}
+
+_ORNAMENT_SPARSITY = 0.30   # share of eligible backbeats that actually get the ornament
+
+
+def _genre_of(name: str) -> str:
+    """The seed genre a library entry came from ("Rock 07 fill" -> "Rock")."""
+    n = name[:-5] if name.endswith(" fill") else name
+    head, _, tail = n.rpartition(" ")
+    return head if head and tail.isdigit() else n
+
+
+def _bake_genre_feel(p: Pattern) -> Pattern:
+    """Apply the genre's idiomatic feel: swing/humanize, sparse ornaments, play-chance on
+    decoration only, and polymeter where the style calls for it.
+
+    Deterministic — seeded from the pattern's name — so a given groove sounds the same on
+    every launch, exactly like the seeded variations it sits alongside.  Never touches the
+    backbone (downbeat kick, backbeat snare): that is what makes a groove a groove.
+    """
+    prof = GENRE_FEEL.get(_genre_of(p.name))
+    if prof is None:
+        return p
+    p.swing = prof["swing"]
+    p.humanize = prof["humanize"]
+    rng = random.Random(f"feel:{p.name}")
+    beat_len = max(1, round(p.steps_per_beat * 4.0 / max(1, p.beat_unit)))
+
+    if prof["snare_orn"]:      # sparse, so it reads as a player's choice, not a machine
+        for s in p.hits.get("snare", []):
+            if s % beat_len == 0 and rng.random() < _ORNAMENT_SPARSITY:
+                p.set_ornament("snare", s, prof["snare_orn"])
+
+    if prof["hat_roll"]:       # ratchets punctuate the off-beats (trap / drill)
+        for s in p.hits.get("hihat", []):
+            if s % beat_len != 0 and rng.random() < prof["hat_roll"]:
+                p.set_ornament("hihat", s, "roll")
+
+    if prof["hat_chance"] and beat_len > 1:   # off-beat hats only — the pulse stays solid
+        for s in p.hits.get("hihat", []):
+            if s % beat_len != 0:
+                p.set_chance("hihat", s, min(90, prof["hat_chance"]))
+
+    if prof["perc_chance"]:
+        for role in ("perc", "tambourine", "shaker"):
+            for s in p.hits.get(role, []):
+                p.set_chance(role, s, min(90, prof["perc_chance"]))
+
+    if prof["poly"]:
+        for role, length in prof["poly"].items():
+            if role in p.hits:
+                p.set_line_length(role, length)
+    return p
+
+
+GENRE_PATTERNS = [_bake_genre_feel(_bake_default_dynamics(p)) for p in GENRE_PATTERNS]
 
 
 # -- the pattern library (500 grooves: hand-made genre bases + seeded variations) --
@@ -941,8 +1094,10 @@ def _two_bars(base: Pattern, name: str) -> Pattern:
             for r, steps in base.hits.items()}
     levels = {r: {s + b * per: lv for b in range(2) for s, lv in m.items()}
               for r, m in base.levels.items()}
+    # Carry the groove's feel across — a variation of a shuffle is still a shuffle.
     return Pattern(name, per * 2, base.steps_per_beat, hits,
-                   base.beats_per_bar, base.beat_unit, 2, levels)
+                   base.beats_per_bar, base.beat_unit, 2, levels,
+                   swing=base.swing, humanize=base.humanize)
 
 
 def _generate_variation(base: Pattern, seed: int, with_fill: bool, name: str) -> Pattern:
@@ -1011,6 +1166,11 @@ def _generate_variation(base: Pattern, seed: int, with_fill: bool, name: str) ->
     p.levels = {r: {s: lv for s, lv in m.items() if s in set(p.hits.get(r, []))}
                 for r, m in p.levels.items()}
     p.levels = {r: m for r, m in p.levels.items() if m}
+    # The variation moved, added and removed steps, so re-derive dynamics and the genre's
+    # feel over the FINAL hit set — otherwise new hits land flat and the groove loses the
+    # swing/chance/ornaments its style calls for.
+    _bake_default_dynamics(p)
+    _bake_genre_feel(p)
     return p
 
 
