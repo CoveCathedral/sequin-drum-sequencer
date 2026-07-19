@@ -1196,7 +1196,94 @@ def build_pattern_library(total: int = 500) -> list[Pattern]:
 
 
 #: Built once at import; deterministic (see build_pattern_library).
-PATTERN_LIBRARY = build_pattern_library()
+# -- showcase grooves ---------------------------------------------------------------
+#
+# The 500 above are a REFERENCE library: a rock beat is straight because rock IS straight,
+# so most of them deliberately don't show off.  These few exist for the opposite reason —
+# each is built to demonstrate one capability you can hear within a bar or two.  Reach for
+# them when you want to hear what the sequencer does, or to show someone else.
+#
+# They are APPENDED to the library rather than added to GENRE_PATTERNS on purpose: the
+# generator cycles through the seeds, so adding one there would renumber every variation and
+# break the "pattern 137 is pattern 137 forever" guarantee.
+
+SHOWCASE_CATEGORY = "Showcase"
+
+
+def _showcase() -> list[Pattern]:
+    out: list[Pattern] = []
+
+    # 1. Polymeter — a 7-step kick cycling under a 4/4 bar, phasing and realigning.
+    poly = _p("Showcase Polymeter (7 against 4)",
+              {"kick": [0, 3, 5], "snare": [4, 12],
+               "hihat": [0, 2, 4, 6, 8, 10, 12, 14], "crash": [0]})
+    poly.set_line_length("kick", 7)      # 7 against 16 -> realigns after seven bars
+    out.append(poly)
+
+    # 2. Chance — the decoration re-rolls every pass, so the loop never repeats exactly.
+    chance = _p("Showcase Chance (varies every pass)",
+                {"kick": [0, 8], "snare": [4, 12], "hihat": list(range(16)),
+                 "perc": [2, 6, 10, 14], "openhat": [7, 15]})
+    for s in range(16):
+        if s % 4 != 0:                   # backbone stays solid; only decoration rolls
+            chance.set_chance("hihat", s, 65)
+    for s in (2, 6, 10, 14):
+        chance.set_chance("perc", s, 50)
+    for s in (7, 15):
+        chance.set_chance("openhat", s, 40)
+    out.append(chance)
+
+    # 3. Ornaments — all three graces in one bar: flam, drag (ruff) and roll (ratchet).
+    orn = _p("Showcase Ornaments (flam, drag, roll)",
+             {"kick": [0, 8], "snare": [4, 12],
+              "hihat": [0, 2, 4, 6, 8, 10, 12, 14], "tom1": [14]})
+    orn.set_ornament("snare", 4, "flam")
+    orn.set_ornament("snare", 12, "drag")
+    orn.set_ornament("hihat", 6, "roll")
+    orn.set_ornament("hihat", 14, "roll")
+    orn.set_ornament("tom1", 14, "flam")
+    out.append(orn)
+
+    # 4. Full kit — a tom run across the whole standard kit, so every part is audible.
+    full = _p("Showcase Full Kit (a tom run)",
+              {"kick": [0, 8], "snare": [4], "tom1": [10], "tom2": [11], "tom": [12],
+               "tom4": [13], "tom5": [14], "crash": [0], "ride": [2, 6], "ridebell": [15],
+               "cowbell": [3], "tambourine": [4, 12], "shaker": [1, 5, 9, 13],
+               "openhat": [7]})
+    out.append(full)
+
+    # 5. Dynamics — the same hat line as accent / normal / ghost, so the range is obvious.
+    dyn = _p("Showcase Dynamics (accents and ghosts)",
+             {"kick": [0, 10], "snare": [4, 12], "hihat": list(range(16))})
+    for s in range(16):
+        if s % 4 == 0:
+            dyn.set_level("hihat", s, LEVEL_ACCENT)
+        elif s % 2 == 1:
+            dyn.set_level("hihat", s, LEVEL_GHOST)
+    dyn.set_level("snare", 4, LEVEL_ACCENT)
+    dyn.set_level("snare", 12, LEVEL_ACCENT)
+    for s in (2, 6, 14):                 # ghosted snare chatter between the backbeats
+        dyn.hits.setdefault("snare", [])
+        dyn.hits["snare"] = sorted(set(dyn.hits["snare"]) | {s})
+        dyn.set_level("snare", s, LEVEL_GHOST)
+    out.append(dyn)
+
+    # 6. Swing — a hard shuffle, next to the straight grooves, to hear what swing does.
+    swing = _p("Showcase Swing (hard shuffle)",
+               {"kick": [0, 8], "snare": [4, 12], "hihat": [0, 2, 4, 6, 8, 10, 12, 14]})
+    swing.swing = 0.66                   # a true triplet shuffle (see the SWING SCALE note)
+    swing.humanize = 0.16
+    out.append(swing)
+
+    for p in out:
+        _bake_default_dynamics(p)
+    return out
+
+
+SHOWCASE_PATTERNS = _showcase()
+
+# The generated 500 stay exactly as they are; the showcase grooves ride along after them.
+PATTERN_LIBRARY = build_pattern_library() + SHOWCASE_PATTERNS
 
 
 def retime_pattern(p: Pattern, beats: int, unit: int, grid: int, bars: int) -> Pattern:

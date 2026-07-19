@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .drums import (
     GENRE_PATTERNS,
+    SHOWCASE_CATEGORY,
     CORE_ROLES,
     ORNAMENTS,
     PATTERN_LIBRARY,
@@ -258,6 +259,8 @@ def build_line_kit(lines: list[dict], kits_dir, base_kit: DrumKit | None = None)
 
 def builtin_category(name: str) -> str:
     """The genre family of a built-in groove ('Rock 04 fill' -> 'Rock')."""
+    if name.startswith(SHOWCASE_CATEGORY):   # the demo grooves are their own family
+        return SHOWCASE_CATEGORY
     best = ""
     for base in GENRE_PATTERNS:
         if name.startswith(base.name) and len(base.name) > len(best):
@@ -472,7 +475,7 @@ def delete_song(settings, name: str) -> bool:
 
 def all_categories(settings) -> list[str]:
     """Every category: the built-in genre families plus the user's own."""
-    cats = {p.name for p in GENRE_PATTERNS}
+    cats = {p.name for p in GENRE_PATTERNS} | {SHOWCASE_CATEGORY}
     for rec in user_patterns(settings):
         if rec.get("category"):
             cats.add(rec["category"])

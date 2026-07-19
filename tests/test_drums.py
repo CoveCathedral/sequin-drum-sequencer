@@ -284,9 +284,13 @@ def test_all_genre_patterns_hits_in_range():
 
 def test_pattern_library_size_and_uniqueness():
     lib = drums.PATTERN_LIBRARY
-    assert len(lib) == 500
+    # The GENERATED core must stay exactly 500: the variation seeds cycle through
+    # GENRE_PATTERNS, so changing that count would renumber every groove ("pattern 137 is
+    # pattern 137 forever"). The showcase grooves ride along after it instead.
+    assert len(drums.build_pattern_library()) == 500
+    assert len(lib) == 500 + len(drums.SHOWCASE_PATTERNS)
     names = [p.name for p in lib]
-    assert len(set(names)) == 500
+    assert len(set(names)) == len(lib)
     # The hand-made bases come first, unchanged.
     assert names[: len(drums.GENRE_PATTERNS)] == [p.name for p in drums.GENRE_PATTERNS]
 
@@ -974,7 +978,10 @@ def test_load_kit_borrows_parts_from_sibling_kits(tmp_path):
 # -- genre feel (swing / humanize / ornaments / chance / polymeter) ----------------
 
 def _lib_genres():
-    return {drums._genre_of(p.name) for p in drums.PATTERN_LIBRARY}
+    # The GENERATED library is what the feel table governs. The showcase grooves are
+    # excluded on purpose: each one hand-authors its own feel to demonstrate a capability,
+    # so it has no entry in GENRE_FEEL by design.
+    return {drums._genre_of(p.name) for p in drums.build_pattern_library()}
 
 
 def test_every_library_genre_has_a_feel_profile():
@@ -1034,3 +1041,30 @@ def test_library_feel_is_deterministic():
         return [(p.name, p.swing, p.humanize, {r: dict(v) for r, v in p.probs.items()},
                  {r: dict(v) for r, v in p.ornaments.items()}, dict(p.lengths)) for p in lib]
     assert sig(drums.build_pattern_library()) == sig(drums.build_pattern_library())
+
+
+def test_showcase_grooves_demonstrate_their_feature():
+    """Each showcase groove must actually exhibit the thing it is named for."""
+    by = {p.name: p for p in drums.SHOWCASE_PATTERNS}
+    assert len(by) == len(drums.SHOWCASE_PATTERNS)          # names are unique
+    poly = by["Showcase Polymeter (7 against 4)"]
+    assert poly.lengths.get("kick") == 7 and poly.is_polymetric()
+    # It genuinely phases: 7 against a 16-step bar realigns over the LCM, not the bar.
+    assert drums.flatten_polymeter(poly).steps == 112
+    assert sum(len(v) for v in by["Showcase Chance (varies every pass)"].probs.values()) > 10
+    orn = by["Showcase Ornaments (flam, drag, roll)"].ornaments
+    assert {o for m in orn.values() for o in m.values()} == {"flam", "drag", "roll"}
+    assert len(by["Showcase Full Kit (a tom run)"].hits) >= 12   # a wide slice of the kit
+    assert by["Showcase Swing (hard shuffle)"].swing > 0.6
+    dyn = by["Showcase Dynamics (accents and ghosts)"].levels
+    assert {lv for m in dyn.values() for lv in m.values()} == {drums.LEVEL_ACCENT,
+                                                               drums.LEVEL_GHOST}
+
+
+def test_showcase_does_not_disturb_the_generated_library():
+    """Appending showcase grooves must not renumber or alter the deterministic 500."""
+    core = drums.build_pattern_library()
+    assert len(core) == 500
+    assert [p.name for p in drums.PATTERN_LIBRARY[:500]] == [p.name for p in core]
+    assert all(p.name.startswith(drums.SHOWCASE_CATEGORY)
+               for p in drums.PATTERN_LIBRARY[500:])
