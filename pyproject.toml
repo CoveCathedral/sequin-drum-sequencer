@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sequin-sequencer"
+version = "1.0.0"
+description = "Sequin — a screen-reader-first, keyboard-only step sequencer / drum machine"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Kaylea", email = "kaylielynnfox@gmail.com" }]
+license = { text = "MIT" }
+# numpy mixes the audio; wxPython is the native (NVDA-friendly) UI toolkit;
+# accessible_output2 speaks the tracker grid's cursor through the screen reader.
+dependencies = [
+    "numpy>=1.24",
+    "wxPython>=4.2",
+    "accessible_output2>=0.17",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-timeout>=2.1"]
+
+[project.scripts]
+sequin = "sequin.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# The headless GUI tests drive real audio/timers with no event loop, which can
+# occasionally wedge; a per-test timeout turns a hang into a fast failure with a trace.
+timeout = 60
+timeout_method = "thread"

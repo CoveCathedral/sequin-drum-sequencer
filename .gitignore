@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# User-supplied drum sample libraries — NOT redistributed (third-party kits may be
+# copyrighted). Drop your own kits under Samples/<KitName>/<ROLE>/*.wav.
+# See docs/drum-kits.md. Only the explanatory README is tracked.
+/Samples/*
+!/Samples/README.md
+
+# Generated HTML manual (built from docs/user-manual.md by scripts/build_manual.py)
+docs/user-manual.html
+
+# OS
+Thumbs.db
+.DS_Store
