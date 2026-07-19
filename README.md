@@ -42,6 +42,18 @@ Kits live under `Samples/<KitName>/<ROLE>/*.wav` (see `docs/drum-kits.md`). Thir
 sample kits are **not** redistributed here — only the explanatory `Samples/README.md` is
 tracked.
 
+## Build a shareable Windows app
+
+```
+pip install pyinstaller
+python scripts/build_exe.py        # -> dist/Sequin/Sequin.exe
+```
+
+Produces a self-contained `dist/Sequin/` folder — zip it and share. It bundles the NVDA
+speech bridge and the manual, and ships **synth-only** (no sample audio, so it's small and
+carries no third-party kits). A user adds kits with **Import**, **Build Kit**, or by dropping
+a `Samples/<KitName>/<ROLE>/*.wav` folder next to `Sequin.exe`.
+
 ## Tests
 
 ```

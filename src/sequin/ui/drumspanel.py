@@ -24,6 +24,7 @@ from typing import Callable
 import wx
 
 from .. import config
+from .._bundle import exe_dir
 from ..practice import (
     CORE_ROLES,
     DRUM_BEAT_UNITS,
@@ -3642,10 +3643,13 @@ class DrumsPanel(wx.Panel):
             saved = self._settings.get("drum_kits_dir")
             if saved and Path(saved).is_dir():
                 return Path(saved)
-        for cand in (Path.cwd() / "Samples", config._config_dir() / "Samples"):
+        # exe_dir()/Samples lets a user drop a Samples folder next to Sequin.exe in a frozen
+        # build; from source it's the working directory (same as before).
+        for cand in (exe_dir() / "Samples", Path.cwd() / "Samples",
+                     config._config_dir() / "Samples"):
             if cand.is_dir():
                 return cand
-        return Path.cwd() / "Samples"
+        return exe_dir() / "Samples"
 
     def _kit_folder_names(self) -> list[str]:
         d = self._kits_dir()

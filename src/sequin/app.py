@@ -15,6 +15,7 @@ from pathlib import Path
 
 import wx
 
+from ._bundle import bundle_root
 from .config import AppSettings
 from .ui import speech, theme
 from .ui.drumspanel import DrumsPanel
@@ -123,11 +124,11 @@ class SequinFrame(wx.Frame):
         self.Refresh()
 
     def _on_manual(self, event) -> None:
-        # Resolve the shipped manual relative to this package (src/sequin/app.py -> repo
-        # root/docs), not the process working directory — `python -m sequin` can be launched
-        # from anywhere, and cwd would send Help -> User Manual to the fallback message box.
-        pkg_docs = Path(__file__).resolve().parents[2] / "docs"
-        for docs in (pkg_docs, Path.cwd() / "docs"):
+        # Resolve the shipped manual relative to the bundle (repo root/docs from source, the
+        # unpacked PyInstaller bundle when frozen), not the process working directory —
+        # `python -m sequin` or a double-clicked Sequin.exe can be launched from anywhere, and
+        # cwd would send Help -> User Manual to the fallback message box.
+        for docs in (bundle_root() / "docs", Path.cwd() / "docs"):
             for name in ("user-manual.html", "user-manual.md"):
                 manual = docs / name
                 if manual.is_file():
