@@ -1,21 +1,12 @@
 """Standalone Sequin UI smoke test: the app frame and its panels construct and react.
 
-Skips automatically if a wx display cannot be created.  (The deep per-feature UI tests —
-pattern editor, song builder, beat editor, kit builder — currently live with FreedomHawk's
-integration suite and exercise this same code through its main frame; they migrate here
-during the audit pass.)
+Fixtures (wx.App, frame, drums, _silence_audio) live in conftest.py, shared with the
+per-feature UI suites (pattern editor, song builder, beat editor, kits).
 """
 
 import pytest
+import wx
 
-wx = pytest.importorskip("wx")
-
-try:
-    _APP = wx.App(False)
-except Exception:  # pragma: no cover - no GUI available
-    pytest.skip("no wx display available", allow_module_level=True)
-
-from sequin.app import SequinFrame
 from sequin.practice.patternstore import resolve_pattern_by_name
 from sequin.ui.drumspanel import (
     DrumsPanel,
@@ -23,32 +14,6 @@ from sequin.ui.drumspanel import (
     SongBeatEditorDialog,
     SongDialog,
 )
-
-
-@pytest.fixture(autouse=True)
-def _silence_audio(monkeypatch):
-    from sequin.ui import speech
-    spoken: list[str] = []
-    monkeypatch.setattr(speech, "speak", lambda text, interrupt=True: spoken.append(text))
-    yield spoken
-    try:
-        import winsound
-        winsound.PlaySound(None, 0)
-    except Exception:  # pragma: no cover - non-Windows / no audio
-        pass
-
-
-@pytest.fixture()
-def frame(tmp_path, monkeypatch):
-    # Isolate the settings file so tests never touch the real one.
-    import sequin.config as cfg
-    monkeypatch.setattr(cfg, "_config_dir", lambda app_name="Sequin": tmp_path)
-    f = SequinFrame()
-    yield f
-    f.drums.dispose()
-    f.metronome.dispose()
-    f.Destroy()
-    wx.SafeYield()
 
 
 def test_frame_builds_with_both_tabs(frame):
