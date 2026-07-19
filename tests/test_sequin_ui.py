@@ -17,7 +17,12 @@ except Exception:  # pragma: no cover - no GUI available
 
 from sequin.app import SequinFrame
 from sequin.practice.patternstore import resolve_pattern_by_name
-from sequin.ui.drumspanel import DrumsPanel, PatternEditorDialog, SongDialog
+from sequin.ui.drumspanel import (
+    DrumsPanel,
+    PatternEditorDialog,
+    SongBeatEditorDialog,
+    SongDialog,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +88,31 @@ def test_song_builder_opens_and_adds_a_section(frame):
         dlg._add()
         assert [s["pattern"] for s in dlg._sections] == ["Rock"]
         assert resolve_pattern_by_name("Rock", d._settings) is not None
+    finally:
+        dlg._stop()
+        dlg.Destroy()
+
+
+def test_beat_editor_keeps_unresolvable_sections_and_per_section_feel(frame):
+    # Regression for two audit fixes: (#14) the audition resolves each section's own tempo
+    # and swing, and (#4) Save rebuilds the whole song in order — a section whose groove is
+    # missing is carried through in place, never silently dropped.
+    d = frame.drums
+    sections = [
+        {"pattern": "Rock", "repeats": 1, "tempo": 100, "swing": 60},
+        {"pattern": "NoSuchGroove_zzz", "repeats": 2},   # groove missing -> unresolvable
+        {"pattern": "Rock", "repeats": 1},
+    ]
+    dlg = SongBeatEditorDialog(d, d, sections, dark=True)
+    try:
+        assert len(dlg._entries) == 2 and dlg._unresolved == 1
+        pat, _reps, bpm, _kit = dlg._resolved()[0]     # first Rock, with its overrides
+        assert bpm == 100
+        assert pat.swing == pytest.approx(0.6)
+        dlg.EndModal = lambda code: None               # not shown modally; skip the real call
+        dlg._on_save()
+        assert [s["pattern"] for s in dlg.result_sections] == \
+            ["Rock", "NoSuchGroove_zzz", "Rock"]
     finally:
         dlg._stop()
         dlg.Destroy()

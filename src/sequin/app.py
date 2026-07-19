@@ -123,15 +123,19 @@ class SequinFrame(wx.Frame):
         self.Refresh()
 
     def _on_manual(self, event) -> None:
-        docs = Path.cwd() / "docs"
-        for name in ("user-manual.html", "user-manual.md"):
-            manual = docs / name
-            if manual.is_file():
-                try:
-                    os.startfile(str(manual))  # noqa: S606 - our own doc file
-                    return
-                except OSError:
-                    continue
+        # Resolve the shipped manual relative to this package (src/sequin/app.py -> repo
+        # root/docs), not the process working directory — `python -m sequin` can be launched
+        # from anywhere, and cwd would send Help -> User Manual to the fallback message box.
+        pkg_docs = Path(__file__).resolve().parents[2] / "docs"
+        for docs in (pkg_docs, Path.cwd() / "docs"):
+            for name in ("user-manual.html", "user-manual.md"):
+                manual = docs / name
+                if manual.is_file():
+                    try:
+                        os.startfile(str(manual))  # noqa: S606 - our own doc file
+                        return
+                    except OSError:
+                        continue
         wx.MessageBox("The manual is in docs/user-manual.html, and online at "
                       "github.com/CoveCathedral/FreedomHawk.", "User manual",
                       wx.ICON_INFORMATION)

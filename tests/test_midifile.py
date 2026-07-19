@@ -88,3 +88,21 @@ def test_empty_pattern_exports_but_reimport_fails():
     assert mid[:4] == b"MThd"
     with pytest.raises(ValueError):
         midi_to_pattern(mid)  # no notes to import
+
+
+def test_truncated_midi_raises_valueerror_not_indexerror():
+    # A cut-off download must surface the documented ValueError ("not a MIDI file"),
+    # never a raw IndexError/struct.error that a blind user hears as gibberish.
+    full = pattern_to_midi(PATTERN_LIBRARY[0], 120)
+    for cut in (13, 20, len(full) - 5, len(full) - 1):   # header, mid-track, near end
+        with pytest.raises(ValueError):
+            midi_to_pattern(full[:cut])
+
+
+def test_wide_low_denominator_meter_capped_to_max_steps():
+    # A single 16/2 bar implies 128 steps at grid 4 — straight from untrusted time-sig
+    # bytes — which must be clamped so the grid stays navigable (<= MAX_STEPS).
+    from sequin.practice.drums import MAX_STEPS
+    p = Pattern("t", 128, 4, {"kick": [0, 64]}, 16, 2, 1)
+    back, _ = midi_to_pattern(pattern_to_midi(p, 100))
+    assert back.steps <= MAX_STEPS

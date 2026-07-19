@@ -108,6 +108,35 @@ def test_load_int16_wav(tmp_path):
     assert np.allclose(loaded, x, atol=1e-3)
 
 
+def _write_raw_int16_wav(path, data_bytes, rate=44100):
+    """A 16-bit PCM WAV whose data chunk holds exactly data_bytes (may be an odd length)."""
+    n = len(data_bytes)
+    header = b"RIFF" + struct.pack("<I", 36 + n) + b"WAVE"
+    header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    header += b"data" + struct.pack("<I", n)
+    Path(path).write_bytes(header + data_bytes)
+
+
+def test_odd_trailing_byte_is_trimmed_not_crashed(tmp_path):
+    # A slightly-off kit WAV (a stray trailing byte for the 16-bit width) must be trimmed to
+    # whole samples, not raise ValueError from np.frombuffer — else the sample is silently
+    # dropped from the kit on load.
+    p = tmp_path / "odd.wav"
+    _write_raw_int16_wav(p, struct.pack("<hhh", 1000, -1000, 500) + b"\x07")  # 3 + stray
+    x, rate = drums.load_wav_float(p)
+    assert rate == 44100 and len(x) == 3
+
+
+def test_wav_duration_survives_truncated_fmt_chunk(tmp_path):
+    # One corrupt file in an imported kit must not take down the wx event loop: a truncated
+    # fmt chunk (struct.error on the header unpack) probes as None, not a raised exception.
+    full = tmp_path / "full.wav"
+    _write_int16_wav(full, np.zeros(100, dtype=np.float32))
+    trunc = tmp_path / "trunc.wav"
+    trunc.write_bytes(full.read_bytes()[:28])   # RIFF + fmt declares 16 bytes, only 8 present
+    assert drums.wav_duration(trunc) is None
+
+
 def test_stereo_downmixes_to_mono(tmp_path):
     frames = 2205
     stereo = np.zeros(frames * 2, dtype=np.float32)

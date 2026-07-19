@@ -93,6 +93,8 @@ def pattern_to_midi(pattern: Pattern, bpm: float,
 def _read_vlq(data: bytes, pos: int) -> tuple[int, int]:
     value = 0
     while True:
+        if pos >= len(data):
+            raise ValueError("truncated MIDI file")
         byte = data[pos]
         pos += 1
         value = (value << 7) | (byte & 0x7F)
@@ -102,7 +104,7 @@ def _read_vlq(data: bytes, pos: int) -> tuple[int, int]:
 
 def _parse_notes(data: bytes):
     """All note-on events as (tick, channel, note), plus any time signature found."""
-    if data[:4] != b"MThd":
+    if data[:4] != b"MThd" or len(data) < 14:
         raise ValueError("not a MIDI file")
     _length, fmt, ntracks, division = struct.unpack(">IHHH", data[4:14])
     if fmt not in (0, 1):
@@ -111,41 +113,47 @@ def _parse_notes(data: bytes):
         raise ValueError("SMPTE-timed MIDI files are not supported")
     notes: list[tuple[int, int, int]] = []
     timesig: tuple[int, int] | None = None
-    pos = 14
-    for _ in range(ntracks):
-        if data[pos:pos + 4] != b"MTrk":
-            break
-        (tlen,) = struct.unpack(">I", data[pos + 4:pos + 8])
-        p, end = pos + 8, pos + 8 + tlen
-        tick = 0
-        status = 0
-        while p < end:
-            delta, p = _read_vlq(data, p)
-            tick += delta
-            byte = data[p]
-            if byte & 0x80:
-                status = byte
-                p += 1
-            if status == 0xFF:  # meta
-                meta = data[p]
-                mlen, p2 = _read_vlq(data, p + 1)
-                if meta == 0x58 and mlen >= 2 and timesig is None:
-                    timesig = (data[p2], 1 << data[p2 + 1])
-                p = p2 + mlen
-            elif status in (0xF0, 0xF7):  # sysex
-                slen, p2 = _read_vlq(data, p)
-                p = p2 + slen
-            else:
-                kind = status & 0xF0
-                if kind in (0x80, 0x90, 0xA0, 0xB0, 0xE0):
-                    if kind == 0x90 and data[p + 1] > 0:
-                        notes.append((tick, status & 0x0F, data[p], data[p + 1]))
-                    p += 2
-                elif kind in (0xC0, 0xD0):
+    # Every raw index below can run off the end of a truncated download; turn that into
+    # the documented ValueError ("not a MIDI file") instead of a raw IndexError/struct.error
+    # so a blind user hears a real explanation, not "list index out of range".
+    try:
+        pos = 14
+        for _ in range(ntracks):
+            if data[pos:pos + 4] != b"MTrk":
+                break
+            (tlen,) = struct.unpack(">I", data[pos + 4:pos + 8])
+            p, end = pos + 8, pos + 8 + tlen
+            tick = 0
+            status = 0
+            while p < end:
+                delta, p = _read_vlq(data, p)
+                tick += delta
+                byte = data[p]
+                if byte & 0x80:
+                    status = byte
                     p += 1
+                if status == 0xFF:  # meta
+                    meta = data[p]
+                    mlen, p2 = _read_vlq(data, p + 1)
+                    if meta == 0x58 and mlen >= 2 and timesig is None:
+                        timesig = (data[p2], 1 << data[p2 + 1])
+                    p = p2 + mlen
+                elif status in (0xF0, 0xF7):  # sysex
+                    slen, p2 = _read_vlq(data, p)
+                    p = p2 + slen
                 else:
-                    raise ValueError("corrupt MIDI track data")
-        pos = end
+                    kind = status & 0xF0
+                    if kind in (0x80, 0x90, 0xA0, 0xB0, 0xE0):
+                        if kind == 0x90 and data[p + 1] > 0:
+                            notes.append((tick, status & 0x0F, data[p], data[p + 1]))
+                        p += 2
+                    elif kind in (0xC0, 0xD0):
+                        p += 1
+                    else:
+                        raise ValueError("corrupt MIDI track data")
+            pos = end
+    except (IndexError, struct.error) as exc:
+        raise ValueError("not a MIDI file (truncated)") from exc
     return notes, timesig, division
 
 
@@ -184,7 +192,9 @@ def midi_to_pattern(data: bytes, grid: int = 4) -> tuple[Pattern, dict]:
     bars = max(1, min(4, -(-(max_step + 1) // per_bar)))  # ceil, capped at 4 bars
     while per_bar * bars > MAX_STEPS and bars > 1:
         bars -= 1
-    total = per_bar * bars
+    # A single wide low-denominator bar (e.g. 16/2 -> 128 steps) can exceed MAX_STEPS on its
+    # own, straight from untrusted time-signature bytes; hard-cap so the grid stays navigable.
+    total = min(per_bar * bars, MAX_STEPS)
     dropped = 0
     clean: dict[str, list] = {}
     levels: dict = {}

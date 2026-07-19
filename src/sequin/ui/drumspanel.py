@@ -364,7 +364,6 @@ class PatternEditorDialog(wx.Dialog):
         self._fill_spill = False
         self._undo: list = []   # (what, snapshot) pairs; Ctrl+Z / Ctrl+Y
         self._redo: list = []
-        self._preview = _PreviewPlayer()
         self._pitch_cache: dict = {}   # (id, kit, sample) -> estimated base Pitch
         self._line_kit = build_line_kit(self.lines, self._kits_dir, base_kit=self._base_kit)
 
@@ -476,6 +475,9 @@ class PatternEditorDialog(wx.Dialog):
         self._rebuild_rows()
         if self.lines:
             self.grid_list.SetSelection(0)
+        # Allocate the preview player (which mkstemps a temp WAV) last, so a throw anywhere
+        # above leaves no half-built dialog holding an undisposed temp file.
+        self._preview = _PreviewPlayer()
         wx.CallAfter(self.grid_list.SetFocus)
 
     # -- state ----------------------------------------------------------------
@@ -742,8 +744,12 @@ class PatternEditorDialog(wx.Dialog):
         line = self._current_line()
         if line is None:
             return
+        cur_len = self._line_len()
+        new_len = max(1, min(POLY_MAX_LINE, cur_len + delta))
+        if new_len == cur_len:                 # already at 1 or POLY_MAX_LINE: no-op, no undo
+            speech.speak(f"{line['label']} length {new_len} steps, at its limit.")
+            return
         self._push_undo("length change")
-        new_len = max(1, min(POLY_MAX_LINE, self._line_len() + delta))
         self.pattern.set_line_length(line["id"], new_len)
         self._cursor = min(self._cursor, new_len - 1)
         self._refresh_row(line)
@@ -869,6 +875,11 @@ class PatternEditorDialog(wx.Dialog):
         if self._cursor not in self.pattern.hits.get(line_id, []):
             speech.speak("No hit at this step. Space places one first.")
             return
+        if self.pattern.chance_of(line_id, self._cursor) == (percent or None):
+            what = f"{percent} percent chance" if percent else "always plays"
+            speech.speak(f"{line['label']} already {what}, "
+                         f"{step_label(self.pattern, self._cursor)}")
+            return
         self._push_undo("chance change")
         self.pattern.set_chance(line_id, self._cursor, percent or None)
         self._refresh_row(line)
@@ -930,7 +941,9 @@ class PatternEditorDialog(wx.Dialog):
         dlg.Destroy()
         if self._mark_start is not None and self._mark_end is not None:
             lo, hi = sorted((self._mark_start, self._mark_end))
-            start, end, where = lo, min(self.pattern.steps, hi + 1), "the marked span"
+            lo = max(0, min(lo, self.pattern.steps - 1))   # clamp so a span can't be stale
+            hi = max(lo, min(hi, self.pattern.steps - 1))  # and the "Fill dropped" is honest
+            start, end, where = lo, hi + 1, "the marked span"
         else:
             start, end, where = 0, self.pattern.steps, "the pattern"
         self._push_undo("fill")
@@ -1012,6 +1025,9 @@ class PatternEditorDialog(wx.Dialog):
         self._rebuild_line_kit()
         self._rebuild_rows()
         self.grid_list.SetSelection(len(self.lines) - 1)
+        # The new line may be shorter than where the shared cursor sits (polymeter): clamp so
+        # a hit can't land past its loop where step_label would announce a nonexistent beat.
+        self._cursor = min(self._cursor, self._line_len() - 1)
         speech.speak(f"Added {line['label']}")
 
     def _delete_line(self) -> None:
@@ -1172,6 +1188,7 @@ class PatternEditorDialog(wx.Dialog):
             self.lines = [dict(ln) for ln in record.get("lines", [])]
         self.silenced.clear()
         self._cursor = 0
+        self._mark_start = self._mark_end = None   # a new groove invalidates any pending span
         self._rebuild_line_kit()
         self._sync_meter_controls()
         self._sync_feel_controls()  # the loaded groove carries its own saved feel
@@ -1231,6 +1248,9 @@ class PatternEditorDialog(wx.Dialog):
         if (beats, unit, grid, bars) != (p.beats_per_bar, p.beat_unit,
                                          p.steps_per_beat, p.bars):
             self._push_undo("meter change")
+            # A pending fill span is absolute step indices; retiming remaps/shrinks the grid
+            # and would leave them stale, so L would claim a fill it didn't place. Drop them.
+            self._mark_start = self._mark_end = None
         grid_changed = grid != self.pattern.steps_per_beat
         was_poly = self.pattern.is_polymetric()
         self.pattern = retime_pattern(self.pattern, beats, unit, grid, bars)
@@ -1268,6 +1288,7 @@ class PatternEditorDialog(wx.Dialog):
             self._stop_audition()
             return
         if not self._player.available:
+            speech.speak("Audio isn't available on this system.")
             return
         self._auditioning = True
         self._player.play(self._render())
@@ -1296,6 +1317,11 @@ class PatternEditorDialog(wx.Dialog):
         # The sliders ARE the groove's saved feel; write straight into the pattern so it
         # travels with Save (and inline into a song).  NVDA speaks the value from the
         # slider's accessible name; a live audition restarts to reflect the new feel.
+        # Make feel undoable like every other edit, but coalesce a whole slider sweep into
+        # one entry (each arrow step fires an event) so it can't flood the undo stack — and
+        # so Ctrl+Z can't silently revert feel just because it wasn't snapshotted.
+        if not (self._undo and self._undo[-1][0] == "feel change"):
+            self._push_undo("feel change")
         self.pattern.swing = self.swing_slider.GetValue() / 100.0
         self.pattern.humanize = self.humanize_slider.GetValue() / 100.0
         self._sync_feel_labels()
@@ -1400,7 +1426,6 @@ class KitSoundsDialog(wx.Dialog):
         self._roles = [r for r in ROLES if r in all_roles]
         self.choices = dict(choices)  # role -> "file.wav" | "Kit/file.wav"; read on Save
         self._sources: list[str] = []  # kit names aligned with source_choice's entries
-        self._player = _PreviewPlayer()
         self._pitch_cache: dict = {}   # file path -> estimated Pitch (lazy)
 
         root = wx.BoxSizer(wx.VERTICAL)
@@ -1454,6 +1479,9 @@ class KitSoundsDialog(wx.Dialog):
         if self._roles:
             self.part_choice.SetSelection(0)
             self._load_sources()
+        # Allocate the preview player (mkstemps a temp WAV) last, so a throw above never
+        # leaves a half-built dialog holding an undisposed temp file.
+        self._player = _PreviewPlayer()
         # Announce the dialog by focusing its primary control on open.
         wx.CallAfter(self.part_choice.SetFocus)
 
@@ -1506,10 +1534,12 @@ class KitSoundsDialog(wx.Dialog):
         source = self._current_source()
         if (src_kit or self._home) == source and current in names:
             self.sample_choice.SetSelection(names.index(current))
-        else:
-            default = default_sample_for(role, files)
-            if default is not None:
-                self.sample_choice.SetSelection(names.index(default.name))
+        elif files:
+            default = default_sample_for(role, files) or files[0]
+            self.sample_choice.SetSelection(names.index(default.name))
+            # Record the shown default so Save/Preview persist it — SetSelection fires no
+            # EVT_CHOICE, so without this the borrowed/default pick was silently lost.
+            self.choices[role] = self._choice_value(default.name)
 
     def _on_sample(self, event: wx.CommandEvent) -> None:
         role = self._current_role()
@@ -1584,7 +1614,6 @@ class KitBuilderDialog(wx.Dialog):
         self.choices: dict[str, Path] = {}   # role -> chosen sample Path; absent = synth
         self.kit_name = ""                   # set on Save
         self._sources: list[str] = []
-        self._player = _PreviewPlayer()
         self._synth = synth_kit() if NUMPY_AVAILABLE else None
         self._pitch_cache: dict = {}
 
@@ -1640,6 +1669,9 @@ class KitBuilderDialog(wx.Dialog):
         theme.apply(self, dark)
         self.part_choice.SetSelection(0)
         self._load_sources()
+        # Allocate the preview player (mkstemps a temp WAV) last, so a throw above never
+        # leaves a half-built dialog holding an undisposed temp file.
+        self._player = _PreviewPlayer()
         wx.CallAfter(self.name_field.SetFocus)
 
     def _current_role(self) -> str | None:
@@ -1727,6 +1759,10 @@ class KitBuilderDialog(wx.Dialog):
 
     def _on_save(self, event: wx.CommandEvent) -> None:
         name = self.name_field.GetValue().strip()
+        # Windows silently drops trailing dots/spaces on folder names, so "Rock." would
+        # normalize onto an existing "Rock" folder and merge into it; strip them first, then
+        # the collision check below catches the overlap.
+        name = name.rstrip(". ")
         # Reject empties, path punctuation, and relative names (. / .. / leading dot) that
         # would escape or land on the kits directory itself.
         if (not name or set(name) & set('\\/:*?"<>|')
@@ -2375,8 +2411,13 @@ class SongDialog(wx.Dialog):
 
     def _move(self, delta: int) -> None:
         i = self._selected()
+        if i < 0:
+            speech.speak("No section selected.")
+            return
         j = i + delta
-        if i < 0 or not (0 <= j < len(self._sections)):
+        if not (0 <= j < len(self._sections)):
+            speech.speak("Already the first section." if delta < 0
+                         else "Already the last section.")
             return
         self._sections[i], self._sections[j] = self._sections[j], self._sections[i]
         self._rebuild()
@@ -2398,6 +2439,12 @@ class SongDialog(wx.Dialog):
 
     def _on_list_key(self, event: wx.KeyEvent) -> None:
         code = event.GetKeyCode()
+        # First-time exploration: the section-editing keys are inaudible no-ops with an empty
+        # list. Speak guidance rather than swallowing the press so the key never feels dead.
+        if not self._sections and code in (wx.WXK_LEFT, wx.WXK_RIGHT, wx.WXK_DELETE,
+                                           ord("M"), ord("m")):
+            speech.speak("No sections yet. Add one on the Add tab.")
+            return
         if code == wx.WXK_LEFT:
             self._change_repeats(-0.5 if event.ShiftDown() else -1)
         elif code == wx.WXK_RIGHT:
@@ -2501,13 +2548,23 @@ class SongDialog(wx.Dialog):
         if pattern is None:
             speech.speak("This section's groove is missing.")
             return
-        kit = self._resolve_kit(s.get("kit"))
-        lines = lines_for_kit(pattern, kit, None)
         was_playing = self._playing
         self._stop()
-        dlg = PatternEditorDialog(self._panel, pattern.copy(), lines, self._panel._kits_dir(),
-                                  set(), self._panel.player, int(s.get("tempo") or self._panel.bpm),
-                                  dark=self._dark, settings=self._settings, base_kit=kit)
+        # Building the editor (kit resolution / lines_for_kit) can throw on a since-deleted
+        # kit; without a guard that's a silent dead button and playback never resumes.
+        try:
+            kit = self._resolve_kit(s.get("kit"))
+            lines = lines_for_kit(pattern, kit, None)
+            dlg = PatternEditorDialog(self._panel, pattern.copy(), lines, self._panel._kits_dir(),
+                                      set(), self._panel.player,
+                                      int(s.get("tempo") or self._panel.bpm),
+                                      dark=self._dark, settings=self._settings, base_kit=kit)
+        except Exception as exc:  # noqa: BLE001 - a swallowed error is a dead button
+            wx.MessageBox(f"Could not open the section editor:\n{exc}",
+                          "Edit section", wx.OK | wx.ICON_ERROR)
+            if was_playing:
+                self._start_playback(announce=False)
+            return
         if dlg.ShowModal() == wx.ID_OK:
             s["inline"] = make_record(
                 "section", "Song", dlg.pattern.beats_per_bar, dlg.pattern.beat_unit,
@@ -2842,6 +2899,8 @@ class SongBeatEditorDialog(wx.Dialog):
         self._pos = 0
         self._added: set[str] = set()      # parts added via Add Line (shown even if empty)
         self._playing = False
+        self._kit_cache: dict = {}         # per-section kit resolution, so the audition
+                                           # matches real playback (not the global kit)
         self.result_sections = None        # the edited sections, set on Save
         # Editable working copy: one entry per playable section, each with a private
         # pattern copy so edits don't touch the shared library groove until Save.
@@ -2851,16 +2910,22 @@ class SongBeatEditorDialog(wx.Dialog):
         self._fill_complexity = 50         # remembered between fills
         self._fill_spill = False
         self._end_timer = None             # ends a once-through song playback
+        # Keep the original section list so a section whose groove can't resolve right now
+        # (a deleted named user groove) is carried through Save unchanged, in place —
+        # never silently dropped.  Each editable entry remembers its origin index.
+        self._sections_in = [dict(s) for s in sections]
         self._entries = []
-        for s in sections:
+        self._unresolved = 0
+        for i, s in enumerate(self._sections_in):
             p = resolve_section_pattern(s, self._settings)
             if p is None:
+                self._unresolved += 1
                 continue
             # dirty=False: an untouched section (even one with an inline) is written back
             # verbatim on Save, so its per-line kit/sample/tune/volume/choke are preserved.
             # "base" is the original inline whose per-line properties an edit must keep.
             self._entries.append({"section": dict(s), "pattern": p.copy(),
-                                  "base": s.get("inline"),
+                                  "base": s.get("inline"), "origin": i,
                                   "name": s.get("pattern") or p.name or "section",
                                   "dirty": False})
         try:
@@ -2876,6 +2941,10 @@ class SongBeatEditorDialog(wx.Dialog):
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
         theme.apply(self, dark)
         wx.CallAfter(self.grid_list.SetFocus)
+        if self._unresolved:            # tell the user; they're kept, just not editable here
+            n = self._unresolved
+            speech.speak(f"{n} section{'s' if n != 1 else ''} can't be edited here "
+                         f"(their groove is missing) but stay in the song. ")
 
     # -- model ----------------------------------------------------------------
 
@@ -3027,7 +3096,7 @@ class SongBeatEditorDialog(wx.Dialog):
         for sd in parts:
             p = resolve_section_pattern(sd, self._settings) or entry["pattern"]
             new_entries.append({"section": dict(sd), "pattern": p.copy(),
-                                "base": sd.get("inline"),
+                                "base": sd.get("inline"), "origin": entry["origin"],
                                 "name": sd.get("pattern") or entry["name"],
                                 "dirty": False})
         self._entries[si:si + 1] = new_entries
@@ -3129,6 +3198,7 @@ class SongBeatEditorDialog(wx.Dialog):
     def _do_fill(self) -> None:
         """L drops an improvised fill across the marked span (or the whole section),
         after asking for its complexity and whether it may spill past the end."""
+        self._stop()   # don't let the loop talk over NVDA reading the modal
         loc = self._grid.locate(self._pos)
         entry = self._entries[loc.section]
         dlg = _FillOptionsDialog(self, self._fill_complexity, self._fill_spill, self._dark)
@@ -3157,6 +3227,7 @@ class SongBeatEditorDialog(wx.Dialog):
 
     def _do_tempo(self) -> None:
         """T sets the tempo of the section under the cursor (the marked section)."""
+        self._stop()   # don't let the loop talk over NVDA reading the modal
         loc = self._grid.locate(self._pos)
         entry = self._entries[loc.section]
         choices = ["Song tempo"] + [str(t) for t in range(TEMPO_MIN, TEMPO_MAX + 1, 5)]
@@ -3192,12 +3263,46 @@ class SongBeatEditorDialog(wx.Dialog):
 
     # -- playback & save ------------------------------------------------------
 
+    def _resolve_kit(self, name: str | None):
+        """The DrumKit a section plays: None -> the globally selected kit; else load it
+        (cached).  Mirrors SongDialog._resolve_kit so the audition uses the same kit the
+        real song does."""
+        if not name:
+            return self._panel._kit
+        if name not in self._kit_cache:
+            if name == SYNTH_LABEL:
+                self._kit_cache[name] = synth_kit()
+            else:
+                try:
+                    self._kit_cache[name] = load_kit_from_folder(
+                        self._panel._kits_dir() / name,
+                        choices=self._panel._saved_choices(name))
+                except Exception:  # noqa: BLE001 - missing/unreadable -> fall back
+                    self._kit_cache[name] = self._panel._kit
+        return self._kit_cache[name]
+
+    def _resolve_entry(self, entry: dict) -> tuple:
+        """One live entry as (Pattern, repeats, bpm, kit) with the section's tempo, kit,
+        swing and improvised-fill overrides applied — so what the user auditions here matches
+        what SongDialog actually plays, not a raw pattern under the global kit."""
+        section = entry["section"]
+        pattern = entry["pattern"]
+        bpm = section.get("tempo") or self._panel.bpm
+        reps = max(0.5, float(section.get("repeats", 1)))
+        if section.get("swing") is not None:        # override the groove's own saved feel
+            pattern = pattern.copy()
+            pattern.swing = section["swing"] / 100.0
+        if section.get("fill") == "improv":
+            pattern = improvised_loop(
+                pattern, max(1, pattern.bars), max(1, int(round(reps))),
+                fill_amount=(section.get("fill_amount") or 0) / 100.0)
+            reps = 1
+        return pattern, reps, bpm, self._resolve_kit(section.get("kit"))
+
     def _resolved(self) -> list:
-        """[(pattern, repeats, bpm, kit)] for the whole song at its current edit state."""
-        bpm0 = self._panel.bpm
-        return [(e["pattern"], e["section"].get("repeats", 1),
-                 e["section"].get("tempo") or bpm0, self._panel._kit)
-                for e in self._entries]
+        """[(pattern, repeats, bpm, kit)] for the whole song at its current edit state,
+        per-section overrides applied."""
+        return [self._resolve_entry(e) for e in self._entries]
 
     def _cursor_seconds(self) -> float:
         """Playing time from the song's start up to the cursor (per-section tempos)."""
@@ -3228,11 +3333,11 @@ class SongBeatEditorDialog(wx.Dialog):
         if not self._audio_ok():
             return
         entry = self._entry_at(self._pos)
-        bpm = entry["section"].get("tempo") or self._panel.bpm
+        pattern, _reps, bpm, kit = self._resolve_entry(entry)
         self._panel.stop()
-        wav = render_loop(entry["pattern"], self._panel._kit, bpm,
+        wav = render_loop(pattern, kit, bpm,
                           volume=self._panel.volume_slider.GetValue() / 100.0,
-                          choke_groups=_auto_hat_choke(entry["pattern"]))
+                          choke_groups=_auto_hat_choke(pattern))
         self._panel.player.play(wav, loop=True)
         self._playing = True
         self.play_btn.SetLabel("&Stop section")
@@ -3278,13 +3383,23 @@ class SongBeatEditorDialog(wx.Dialog):
             self.play_btn.SetLabel("Play &section")
 
     def _on_save(self) -> None:
-        out = []
+        # Rebuild the whole song in original order: each section either becomes its edited
+        # entries (one, or several after a split) or — if its groove never resolved — is
+        # carried through unchanged, so nothing is silently dropped.
+        by_origin: dict[int, list] = {}
         for e in self._entries:
-            s = dict(e["section"])
-            if e["dirty"]:      # keep the original per-line source/tune/volume/choke
-                s["inline"] = inline_record_from_pattern(e["pattern"],
-                                                         base_record=e.get("base"))
-            out.append(s)
+            by_origin.setdefault(e["origin"], []).append(e)
+        out = []
+        for i, original in enumerate(self._sections_in):
+            if i in by_origin:
+                for e in by_origin[i]:
+                    s = dict(e["section"])
+                    if e["dirty"]:   # keep the original per-line source/tune/volume/choke
+                        s["inline"] = inline_record_from_pattern(e["pattern"],
+                                                                 base_record=e.get("base"))
+                    out.append(s)
+            else:
+                out.append(dict(original))     # unresolvable section preserved in place
         self.result_sections = out
         self._stop()
         self.EndModal(wx.ID_OK)
@@ -3628,6 +3743,13 @@ class DrumsPanel(wx.Panel):
             self._announce(f"Kit '{sel}' loaded: {len(kit.roles())} parts.")
         except Exception as exc:  # noqa: BLE001
             wx.MessageBox(f"Could not load kit:\n{exc}", "Drum kit", wx.ICON_ERROR)
+            # _kit_dir/_kit are only updated on success, so they still name the last good
+            # kit; put the dropdown back on it so NVDA doesn't announce a kit that Start and
+            # Kit Sounds aren't actually using.
+            good = SYNTH_LABEL if self._kit_dir is None else self._kit_dir.name
+            idx = self.kit_choice.FindString(good)
+            if idx != wx.NOT_FOUND:
+                self.kit_choice.SetSelection(idx)
 
     def _build_kit_folder(self, name: str, choices: dict) -> Path:
         """Write a self-contained kit folder: each chosen sample copied into its part's
@@ -4274,6 +4396,7 @@ class DrumLibraryDialog(wx.Dialog):
     def _on_rename(self, event) -> None:
         rec = self._current()
         if rec is None:
+            speech.speak("No pattern selected.")
             return
         with wx.TextEntryDialog(self, "New name:", "Rename pattern", rec["name"]) as dlg:
             theme.apply(dlg, self._dark)
@@ -4292,6 +4415,7 @@ class DrumLibraryDialog(wx.Dialog):
     def _on_change_category(self, event) -> None:
         rec = self._current()
         if rec is None:
+            speech.speak("No pattern selected.")
             return
         cats = all_categories(self._settings) + ["New category..."]
         dlg = wx.SingleChoiceDialog(self, f"Category for '{rec['name']}':",
@@ -4315,6 +4439,7 @@ class DrumLibraryDialog(wx.Dialog):
     def _on_delete(self, event) -> None:
         rec = self._current()
         if rec is None:
+            speech.speak("No pattern selected.")
             return
         if wx.MessageBox(f"Delete the pattern '{rec['name']}'? This cannot be undone.",
                          "Delete pattern", wx.YES_NO | wx.ICON_WARNING) != wx.YES:

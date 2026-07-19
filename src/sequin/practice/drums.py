@@ -169,12 +169,17 @@ def folder_to_role(name: str) -> str | None:
 
 # -- WAV loading (handles int 8/16/24/32, float 32/64, any rate, mono/stereo) ------
 
+def _trim(data: bytes, width: int) -> bytes:
+    """Whole samples only — a stray trailing byte must not make np.frombuffer raise."""
+    return data[: (len(data) // width) * width]
+
+
 def _decode_pcm(data: bytes, audio_format: int, bits: int):
     if audio_format == 1:  # integer PCM
         if bits == 8:
             return (np.frombuffer(data, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
         if bits == 16:
-            return np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
+            return np.frombuffer(_trim(data, 2), dtype="<i2").astype(np.float32) / 32768.0
         if bits == 24:
             b = np.frombuffer(data, dtype=np.uint8)
             usable = (len(b) // 3) * 3
@@ -183,12 +188,13 @@ def _decode_pcm(data: bytes, audio_format: int, bits: int):
             val = np.where(val & 0x800000, val - 0x1000000, val)
             return val.astype(np.float32) / float(2 ** 23)
         if bits == 32:
-            return (np.frombuffer(data, dtype="<i4").astype(np.float64) / float(2 ** 31)).astype(np.float32)
+            return (np.frombuffer(_trim(data, 4), dtype="<i4").astype(np.float64)
+                    / float(2 ** 31)).astype(np.float32)
     elif audio_format == 3:  # IEEE float
         if bits == 32:
-            return np.frombuffer(data, dtype="<f4").astype(np.float32)
+            return np.frombuffer(_trim(data, 4), dtype="<f4").astype(np.float32)
         if bits == 64:
-            return np.frombuffer(data, dtype="<f8").astype(np.float32)
+            return np.frombuffer(_trim(data, 8), dtype="<f8").astype(np.float32)
     raise ValueError(f"unsupported WAV: format {audio_format}, {bits}-bit")
 
 
@@ -493,8 +499,8 @@ def wav_duration(path) -> float | None:
         if not rate or not block or data_size is None:
             return None
         return data_size / block / rate
-    except OSError:
-        return None
+    except Exception:  # noqa: BLE001 - a best-effort probe: a truncated header (struct.error),
+        return None    # an unreadable file (OSError), anything — must never crash a caller.
 
 
 def list_role_files(kit_dir) -> dict[str, list]:

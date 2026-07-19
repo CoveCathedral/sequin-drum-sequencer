@@ -23,3 +23,6 @@ docs/user-manual.html
 # OS
 Thumbs.db
 .DS_Store
+
+# Local audit working doc
+AUDIT-v1.md

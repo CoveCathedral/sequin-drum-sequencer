@@ -582,6 +582,22 @@ def record_from_file_dict(data: dict) -> dict:
         def _level_steps(key):
             return sorted({int(s) for s in ln.get(key, [])
                            if isinstance(s, (int, float)) and int(s) in steps})
+
+        def _step_map(key, keep):
+            """Sanitize a {step: value} map (chances/ornaments), keeping only real hits."""
+            out = {}
+            for k, v in (ln.get(key) or {}).items():
+                try:
+                    s = int(k)
+                except (ValueError, TypeError):
+                    continue
+                kept = keep(v)
+                if s in steps and kept is not None:
+                    out[str(s)] = kept
+            return out
+        chances = _step_map("chances",
+                            lambda v: int(v) if isinstance(v, (int, float)) and 0 < int(v) < 100 else None)
+        ornaments = _step_map("ornaments", lambda v: v if v in ORNAMENTS else None)
         lines.append({
             "id": str(ln["id"]), "label": str(ln.get("label") or ln["id"]),
             "role": role, "kit": (str(ln["kit"]) if ln.get("kit") else None),
@@ -589,8 +605,16 @@ def record_from_file_dict(data: dict) -> dict:
             "steps": steps, "length": length, "tune": clamp_tune(ln.get("tune")),
             "gain_db": clamp_gain_db(ln.get("gain_db")), "choke": clamp_choke(ln.get("choke")),
             "accents": _level_steps("accents"), "ghosts": _level_steps("ghosts"),
+            "chances": chances, "ornaments": ornaments,
         })
     if not lines:
         raise ValueError("the pattern's lines are unreadable")
+
+    def _feel(key):  # a groove carries its own swing/humanize (0..1)
+        try:
+            return round(max(0.0, min(1.0, float(data.get(key, 0.0) or 0.0))), 4)
+        except (ValueError, TypeError):
+            return 0.0
     return {"name": name, "category": str(data.get("category") or "Imported"),
-            "beats": beats, "unit": unit, "grid": grid, "bars": bars, "lines": lines}
+            "beats": beats, "unit": unit, "grid": grid, "bars": bars, "lines": lines,
+            "swing": _feel("swing"), "humanize": _feel("humanize")}

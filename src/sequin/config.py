@@ -29,15 +29,33 @@ class AppSettings:
         self.load()
 
     def load(self) -> None:
-        try:
-            self.data = json.loads(Path(self._file).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            self.data = {}
+        # This one file holds all the user's patterns and songs, so read defensively:
+        # a corrupt/partial main file falls back to the last good backup, and anything
+        # that isn't a JSON object is treated as empty rather than crashing every launch.
+        for candidate in (self._file, Path(str(self._file) + ".bak")):
+            try:
+                loaded = json.loads(Path(candidate).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(loaded, dict):
+                self.data = loaded
+                return
+        self.data = {}
 
     def save(self) -> None:
+        # Write atomically (temp file + os.replace) and keep a .bak, so an interrupted or
+        # concurrent write can never truncate the library into oblivion.
+        f = Path(self._file)
         try:
-            Path(self._file).parent.mkdir(parents=True, exist_ok=True)
-            Path(self._file).write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_name(f.name + ".tmp")
+            tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+            if f.exists():
+                try:
+                    os.replace(f, f.with_name(f.name + ".bak"))
+                except OSError:
+                    pass
+            os.replace(tmp, f)
         except OSError:
             pass
 

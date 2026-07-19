@@ -178,6 +178,25 @@ def test_pattern_file_carries_tune_gain_and_choke(tmp_path):
     assert back["lines"][0]["choke"] == 2
 
 
+def test_shared_file_import_keeps_chances_ornaments_and_feel():
+    # The shared .json import path (record_from_file_dict) must carry through probability
+    # locks, ornaments, and swing/humanize feel — not silently flatten a groove on import.
+    line = dict(ps.make_line("snare"), steps=[0, 4, 8])
+    pattern = ps.lines_to_pattern([line], 4, 4, 4, 1, name="share")
+    pattern.set_chance("snare", 4, 40)
+    pattern.set_ornament("snare", 8, "roll")
+    pattern.swing, pattern.humanize = 0.5, 0.2
+    record = ps.make_record("share", "Imported", 4, 4, 4, 1, [line], pattern)
+    back = ps.record_from_file_dict(ps.record_to_file_dict(record))
+    assert back["lines"][0]["chances"] == {"4": 40}
+    assert back["lines"][0]["ornaments"] == {"8": "roll"}
+    assert back["swing"] == 0.5 and back["humanize"] == 0.2
+    p2 = ps.record_to_pattern(back)               # and it reconstructs into the pattern
+    assert p2.chance_of("snare", 4) == 40
+    assert p2.ornament_of("snare", 8) == "roll"
+    assert p2.swing == 0.5 and p2.humanize == 0.2
+
+
 def test_song_store_resolve_save_load(tmp_path, monkeypatch):
     import firehawk.config as config
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "s.json")
