@@ -63,4 +63,25 @@ pytest
 
 ## License
 
-MIT — see `LICENSE`.
+**Copyright © 2026 Kaylea Fox.**
+
+Sequin is free software, licensed under the **GNU Affero General Public License v3.0 or
+later (AGPL-3.0-or-later)** — see [LICENSE](LICENSE).
+
+**What that means in plain English:**
+
+- ✅ **Use it freely, for anything**, including professionally. Play gigs with it, record and
+  sell your music, teach paid lessons with it. Using Sequin costs nothing and requires
+  nothing. That freedom is the whole point — this was built so blind musicians can *work*.
+- ✅ **Read, modify, learn from, and share the code.**
+- ⚠️ **If you distribute a modified version** — or run one as a network service — **you must
+  release your source under this same license and keep the copyright notice.** You cannot
+  take Sequin, close the source, rebrand it, and ship it as your own product.
+- 🔗 **Credit:** if you build on Sequin or reuse its code, please credit
+  **Kaylea Fox** and link back to
+  [this repository](https://github.com/CoveCathedral/sequin-drum-sequencer).
+
+**Commercial / proprietary licensing:** the AGPL's share-alike requirement doesn't work for
+every business. If you want to use Sequin in a closed-source or proprietary product, that's
+negotiable — the copyright holder can grant a separate commercial license. Open an issue or
+get in touch.

@@ -301,6 +301,13 @@ S read the cursor step · Alt+P play/pause · Ctrl+Z / Ctrl+Y undo / redo.
 
 ## Getting help and contributing
 
-Sequin is open source (MIT):
+Sequin is free software:
 [github.com/CoveCathedral/sequin-drum-sequencer](https://github.com/CoveCathedral/sequin-drum-sequencer).
 Issues and pull requests are welcome — screen-reader testing feedback most of all.
+
+**Licensing.** Copyright © 2026 Kaylea Fox, under the GNU Affero General Public License v3
+or later. **You may use Sequin for anything, including paid work** — gig with it, record and
+sell your music, teach with it. If you distribute a modified version, you must share your
+source under the same license and keep the credit. If you want to use Sequin in a
+closed-source or commercial product, a separate commercial license can be arranged — get in
+touch.

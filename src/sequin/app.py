@@ -1,5 +1,18 @@
 """Sequin — the accessible step sequencer, as a standalone app.
 
+Copyright (C) 2026 Kaylea Fox
+
+This program is free software: you can redistribute it and/or modify it under the terms of
+the GNU Affero General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along with this
+program.  If not, see <https://www.gnu.org/licenses/>.
+
 Runs the same Sequin that FreedomHawk embeds — the accessible drum machine / step
 sequencer (``ui.drumspanel.DrumsPanel`` over the pedal-independent ``practice`` engine) —
 in its own window, with its own menu.  This is the *tandem standalone* entry point: launch
@@ -147,8 +160,13 @@ class SequinFrame(wx.Frame):
             "A screen-reader-first, keyboard-only drum machine and step sequencer for "
             "blind and low-vision musicians (built and tested with NVDA). Designed "
             "non-visually from the ground up — the spoken tracker grid is the interface.\n\n"
-            "Ships inside FreedomHawk and standalone. MIT.\n"
-            "github.com/CoveCathedral/FreedomHawk",
+            "Copyright © 2026 Kaylea Fox.\n"
+            "Free software under the GNU Affero General Public License, version 3 or later. "
+            "It comes with ABSOLUTELY NO WARRANTY. You are free to use it for anything, "
+            "including paid work; if you distribute a modified version you must share your "
+            "source under the same license.\n\n"
+            "Source code: github.com/CoveCathedral/sequin-drum-sequencer\n"
+            "Sequin also ships inside FreedomHawk.",
             "About Sequin", wx.ICON_INFORMATION)
 
     def _on_close(self, event) -> None:

@@ -8,8 +8,8 @@ version = "1.0.0"
 description = "Sequin — a screen-reader-first, keyboard-only step sequencer / drum machine"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Kaylea", email = "kaylielynnfox@gmail.com" }]
-license = { text = "MIT" }
+authors = [{ name = "Kaylea Fox", email = "kaylielynnfox@gmail.com" }]
+license = { text = "AGPL-3.0-or-later" }
 # numpy mixes the audio; wxPython is the native (NVDA-friendly) UI toolkit;
 # accessible_output2 speaks the tracker grid's cursor through the screen reader.
 dependencies = [

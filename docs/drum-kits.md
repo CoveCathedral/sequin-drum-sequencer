@@ -500,6 +500,35 @@ My Kit/
 └── FX/        riser.wav
 ```
 
+### The one rule that trips up real sample packs: **exactly one level deep**
+
+Part folders must sit **directly inside the kit folder**, and the `.wav` files must sit
+**directly inside a part folder**. Sequin does not search deeper, so:
+
+```
+Make Pop Music Mellow/
+├── Kicks/              kick_01.wav          ✅ found
+└── Hi Hats/
+    ├── Live Hats/      hat_01.wav           ❌ INVISIBLE — one level too deep
+    └── Drum Machine Hats/ hat_02.wav        ❌ INVISIBLE
+```
+
+That kit imports with **no hi-hats at all** — the folder name matches fine, it's the nesting
+that hides the samples. Two common shapes to watch for, and the fix for each:
+
+- **Samples nested in sub-categories** (`Hi Hats/Live Hats/…`). Move the `.wav` files up into
+  the part folder. Better: split them by what they are — open hats into `OPENHAT`, foot/pedal
+  hats into `PEDALHAT`, the rest into `HIHAT` — and you get three playable parts instead of
+  one.
+- **A "pack" holding several kits** (`Some Pack/JAZZ KIT/…`, `Some Pack/ROOTS KIT/…`). That's
+  not one kit, it's two. Give each its **own top-level folder** in `Samples/`, with part
+  folders inside. Loose `.wav` files sitting straight in a kit folder — with no part folder
+  around them — are ignored too; sort them into `KICK/`, `SNARE/`, and so on (their filenames
+  usually tell you which, e.g. `kick loud.wav`, `ride bell.wav`, `xstick.wav`).
+
+If a kit shows up in the **Kit** dropdown but a part is missing or silent, this is almost
+always why.
+
 Folder names are matched **loosely and case-insensitively**, so the names sample packs
 actually ship just work — plurals (`Kicks`, `Snares`), spaced and worded names
 (`Closed Hats`, `Organic Percussions`, `808 Bass`), and keyword matches (anything with
