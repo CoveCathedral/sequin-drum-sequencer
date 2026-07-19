@@ -1068,3 +1068,72 @@ def test_showcase_does_not_disturb_the_generated_library():
     assert [p.name for p in drums.PATTERN_LIBRARY[:500]] == [p.name for p in core]
     assert all(p.name.startswith(drums.SHOWCASE_CATEGORY)
                for p in drums.PATTERN_LIBRARY[500:])
+
+
+def _ghost_chatter(p):
+    """Ghosted snare strokes between the backbeats, excluding a fill's own ghosting."""
+    beat = max(1, round(p.steps_per_beat * 4.0 / max(1, p.beat_unit)))
+    n = 0
+    for s, lv in p.levels.get("snare", {}).items():
+        if lv == drums.LEVEL_GHOST and s % beat != 0:
+            if p.name.endswith("fill") and s >= p.steps - 2 * beat:
+                continue                      # inside the fill run, not chatter
+            n += 1
+    return n
+
+
+def test_ghost_chatter_only_where_the_style_wants_it():
+    lib = drums.build_pattern_library()
+    for genre, prof in drums.GENRE_FEEL.items():
+        pats = [p for p in lib if drums._genre_of(p.name) == genre]
+        chatter = sum(_ghost_chatter(p) for p in pats)
+        if prof["ghost"] == 0:
+            # Styles built on space and impact must stay clean — doom, breakdown, blast
+            # beats and minimal techno do not chatter.
+            assert chatter == 0, f"{genre} should have no ghost chatter"
+    by = {p.name: p for p in lib}
+    assert _ghost_chatter(by["Funk"]) > 0            # the defining funk texture
+    assert _ghost_chatter(by["Second Line"]) > 0
+    assert _ghost_chatter(by["Motorik"]) == 0
+
+
+def test_ghost_chatter_is_capped_and_off_the_beat():
+    lib = drums.build_pattern_library()
+    for p in lib:
+        beat = max(1, round(p.steps_per_beat * 4.0 / max(1, p.beat_unit)))
+        per_bar = max(1, p.steps // max(1, p.bars))
+        per = {}
+        for s, lv in p.levels.get("snare", {}).items():
+            if lv == drums.LEVEL_GHOST and s % beat != 0:
+                per[s // per_bar] = per.get(s // per_bar, 0) + 1
+        # The cap applies to chatter; a fill's own ghosting rides on top of it.
+        assert all(v <= drums._GHOST_MAX_PER_BAR + 4 for v in per.values()), p.name
+
+
+def test_fills_are_ornamented_and_run_the_toms():
+    lib = drums.build_pattern_library()
+    fills = [p for p in lib if p.name.endswith("fill")]
+    assert len(fills) > 100
+    # Drummers grace their fills; a good share of them should now carry an ornament.
+    assert sum(1 for p in fills if p.ornaments) > len(fills) // 4
+    # Kit idioms descend the toms instead of hammering one.
+    multi = [p for p in fills
+             if len([t for t in p.hits if t.startswith("tom")]) > 1]
+    assert multi, "no fill uses more than one tom"
+    assert all(drums.GENRE_FEEL[drums._genre_of(p.name)]["tom_run"] for p in multi)
+    # Snare-only idioms never grow a tom run.
+    for genre in ("Punk", "Second Line", "Trap", "Techno"):
+        for p in (x for x in fills if drums._genre_of(x.name) == genre):
+            assert len([t for t in p.hits if t.startswith("tom")]) <= 1, p.name
+
+
+def test_fill_ornaments_use_only_the_styles_vocabulary():
+    lib = drums.build_pattern_library()
+    for p in lib:
+        prof = drums.GENRE_FEEL.get(drums._genre_of(p.name))
+        if not prof:
+            continue
+        allowed = set(prof["fill_kinds"]) | {prof["snare_orn"], "roll"} - {None}
+        for role, m in p.ornaments.items():
+            for orn in m.values():
+                assert orn in allowed, f"{p.name}: {role} got {orn}, not in {allowed}"

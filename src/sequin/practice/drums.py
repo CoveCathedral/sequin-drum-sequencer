@@ -947,8 +947,10 @@ def _bake_default_dynamics(p: Pattern) -> Pattern:
 
 
 def _feel(swing=0.0, hum=0.10, orn=None, roll=0.0, hat=0, perc=0, poly=None) -> dict:
+    # fill_orn / fill_kinds / tom_run / ghost are merged in from _FILL_FEEL below.
     return {"swing": swing, "humanize": hum, "snare_orn": orn,
-            "hat_roll": roll, "hat_chance": hat, "perc_chance": perc, "poly": poly}
+            "hat_roll": roll, "hat_chance": hat, "perc_chance": perc, "poly": poly,
+            "fill_orn": 0.0, "fill_kinds": (), "tom_run": False, "ghost": 0}
 
 
 GENRE_FEEL: dict[str, dict] = {
@@ -1024,6 +1026,88 @@ GENRE_FEEL: dict[str, dict] = {
     "5/4 Fast": _feel(hum=0.10),
 }
 
+# -- fills & ghost notes, per genre -------------------------------------------------
+#
+# (fill_orn %, ornament kinds, tom_run, ghost %) — its own table so a style's fill character
+# can be tuned by ear without disturbing its swing/humanize.
+#
+#   fill_orn  PER-HIT chance that a hit inside a fill gets an ornament. A fill is ~85%
+#             dense, so even a rudimental style rarely wants more than ~35 — past that the
+#             run turns to mush.
+#   tom_run   the fill DESCENDS across the five toms instead of hammering one. Right for kit
+#             idioms (rock, metal, prog, R&B); wrong where fills are snare-only (punk,
+#             second line, trap, most electronic).
+#   ghost     chance of a quiet off-beat snare stroke between the backbeats — the 16th
+#             chatter that defines funk and R&B, and is flatly wrong in styles built on
+#             space and impact (doom, breakdown, ballad, blast beats, minimal techno).
+
+_FILL_FEEL: dict[str, tuple] = {
+    "Rock": (15, ("flam",), True, 10),
+    "Pop": (8, ("flam",), True, 5),
+    "Four on the Floor": (8, ("flam",), True, 10),
+    "Half-Time": (10, ("flam",), True, 5),
+    "Hard Rock": (15, ("flam",), True, 5),
+    "Punk": (5, ("flam",), False, 0),
+    "Grunge": (22, ("flam",), True, 8),
+    "Motorik": (0, (), False, 0),
+    "Surf": (25, ("flam", "roll"), True, 0),
+    "Ballad": (8, ("flam",), True, 0),
+    "Metal": (12, ("flam",), True, 5),
+    "Thrash Gallop": (8, ("flam",), True, 0),
+    "Blast Beat": (10, ("roll",), False, 0),
+    "D-Beat": (0, (), False, 0),
+    "Breakdown": (0, (), False, 0),
+    "Doom": (8, ("flam",), True, 0),
+    "Djent 7/16 (poly)": (10, ("roll", "flam"), True, 4),
+    "Funk": (18, ("flam", "drag"), True, 70),
+    "Motown": (12, ("flam",), True, 35),
+    "Second Line": (35, ("flam", "drag", "roll"), False, 75),
+    "Boogaloo": (10, ("flam",), True, 45),
+    "Nu-Disco": (14, ("roll",), True, 8),
+    "Hip-Hop": (10, ("flam", "roll"), False, 20),
+    "Trap": (30, ("roll",), False, 0),
+    "Boom Bap": (15, ("flam", "drag"), False, 32),
+    "Drill": (20, ("roll",), False, 0),
+    "Lo-Fi": (8, ("flam",), False, 22),
+    "R&B": (15, ("flam", "drag"), True, 35),
+    "Trip-Hop": (10, ("roll",), False, 12),
+    "Reggaeton": (20, ("roll", "flam"), False, 0),
+    "House": (10, ("roll",), False, 5),
+    "Techno": (8, ("roll",), False, 0),
+    "Trance": (25, ("roll",), False, 0),
+    "Drum and Bass": (22, ("roll", "drag"), False, 45),
+    "Dubstep": (15, ("roll",), False, 0),
+    "Breakbeat": (18, ("flam", "roll"), False, 35),
+    "UK Garage": (15, ("roll",), False, 30),
+    "Bossa Nova": (0, (), False, 8),
+    "Samba": (25, ("drag", "roll"), False, 55),
+    "Afrobeat": (15, ("flam", "drag"), True, 50),
+    "Reggae One Drop": (10, ("flam",), True, 10),
+    "Ska": (25, ("flam", "drag"), False, 15),
+    "Soca": (20, ("flam", "roll"), True, 20),
+    "Jazz Swing": (30, ("flam", "drag", "roll"), False, 15),
+    "Blues Shuffle": (20, ("flam", "drag"), False, 35),
+    "Jazz Waltz": (25, ("drag", "roll"), False, 10),
+    "Gospel 6/8": (25, ("flam", "roll", "drag"), True, 20),
+    "Country Train": (20, ("flam", "roll"), False, 60),
+    "Waltz": (10, ("flam", "drag"), False, 8),
+    "March": (35, ("flam", "drag", "roll"), False, 0),
+    "Polka": (10, ("flam",), False, 0),
+    "5/4": (12, ("flam",), True, 15),
+    "7/8 (2+2+3)": (15, ("flam", "drag"), True, 12),
+    "6/8": (12, ("flam",), True, 10),
+    "5/8 (3+2)": (12, ("flam", "drag"), False, 8),
+    "9/8": (15, ("flam", "drag"), True, 12),
+    "7/4": (12, ("flam",), True, 15),
+    "11/8 (3+3+3+2)": (15, ("flam", "drag"), True, 12),
+    "5/4 Fast": (8, ("flam",), True, 12),
+}
+
+for _g, (_fo, _fk, _tr, _gs) in _FILL_FEEL.items():
+    GENRE_FEEL[_g].update(fill_orn=_fo / 100.0, fill_kinds=_fk, tom_run=_tr, ghost=_gs)
+
+
+_GHOST_MAX_PER_BAR = 3      # keep the chatter a texture, never a second snare part
 _ORNAMENT_SPARSITY = 0.30   # share of eligible backbeats that actually get the ornament
 
 
@@ -1069,6 +1153,26 @@ def _bake_genre_feel(p: Pattern) -> Pattern:
         for role in ("perc", "tambourine", "shaker"):
             for s in p.hits.get(role, []):
                 p.set_chance(role, s, min(90, prof["perc_chance"]))
+
+    if prof["ghost"] and beat_len > 1:
+        # The 16th-note chatter that makes funk and R&B breathe: quiet strokes BETWEEN the
+        # backbeats. Capped per bar so it stays a texture rather than becoming a second
+        # snare part, and it never lands on a beat — the backbeat has to stay solid.
+        snare = set(p.hits.get("snare", []))
+        per_bar = max(1, p.steps // max(1, p.bars))
+        added_in_bar: dict[int, int] = {}
+        for s in range(p.steps):
+            if s % beat_len == 0 or s in snare:
+                continue                      # on the beat, or already playing
+            bar = s // per_bar
+            if added_in_bar.get(bar, 0) >= _GHOST_MAX_PER_BAR:
+                continue
+            if rng.random() * 100 < prof["ghost"]:
+                snare.add(s)
+                p.set_level("snare", s, LEVEL_GHOST)
+                added_in_bar[bar] = added_in_bar.get(bar, 0) + 1
+        if snare:
+            p.hits["snare"] = sorted(snare)
 
     if prof["poly"]:
         for role, length in prof["poly"].items():
@@ -1146,17 +1250,34 @@ def _generate_variation(base: Pattern, seed: int, with_fill: bool, name: str) ->
         for role in ("snare", "hihat", "openhat", "clap", "tom", "perc"):
             if role in p.hits:
                 p.hits[role] = [s for s in p.hits[role] if s < start]
+        prof = GENRE_FEEL.get(_genre_of(name), {})
+        # A kit player turns a fill DOWN the toms; a snare-only idiom (punk, second line,
+        # trap, most electronic) keeps it on the snare. TOM_ROLES is already high-to-low.
+        tom_run = prof.get("tom_run") and len(TOM_ROLES) > 1
+        span = max(1, total - start)
         first = True
+        touched = set()
         for s in range(start, total):
             if rng.random() < 0.85:
-                role = rng.choice(("snare", "tom", "tom", "snare"))
+                if tom_run:
+                    # Descend across the toms as the fill progresses; the snare still leads.
+                    step = (s - start) / span
+                    role = "snare" if (first or rng.random() < 0.25) else \
+                        TOM_ROLES[min(len(TOM_ROLES) - 1, int(step * len(TOM_ROLES)))]
+                else:
+                    role = rng.choice(("snare", "tom", "tom", "snare"))
                 p.hits.setdefault(role, []).append(s)
+                touched.add(role)
                 if first:  # the fill announces itself, then breathes
                     p.set_level(role, s, LEVEL_ACCENT)
                     first = False
                 elif rng.random() < 0.3:
                     p.set_level(role, s, LEVEL_GHOST)
-        for role in ("snare", "tom"):
+                # Ornament the fill the way the style would — drummers grace their fills.
+                kinds = prof.get("fill_kinds") or ()
+                if kinds and rng.random() < prof.get("fill_orn", 0.0):
+                    p.set_ornament(role, s, rng.choice(kinds))
+        for role in touched | {"snare", "tom"}:
             if role in p.hits:
                 p.hits[role] = sorted(set(p.hits[role]))
         p.hits["crash"] = sorted(set(p.hits.get("crash", [])) | {0})
