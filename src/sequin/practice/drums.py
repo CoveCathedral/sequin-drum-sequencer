@@ -465,9 +465,17 @@ def synth_perc(rate: int = RATE) -> "np.ndarray":
 class DrumKit:
     name: str
     voices: dict = field(default_factory=dict)
+    # A kit that answers for roles this one lacks (sample kits get the synth kit here), so
+    # a groove never goes silent just because the pack shipped without a kick.  roles()
+    # deliberately does NOT include fallback roles — announcements stay honest about what
+    # the kit itself contains.
+    fallback: "DrumKit | None" = None
 
     def voice(self, role: str):
-        return self.voices.get(role)
+        v = self.voices.get(role)
+        if v is None and self.fallback is not None:
+            return self.fallback.voice(role)
+        return v
 
     def roles(self) -> list[str]:
         # Canonical roles in display order, then any custom line ids (mix-and-match
@@ -648,7 +656,23 @@ def load_kit_from_folder(path, rate: int = RATE, choices: dict | None = None) ->
                     voices[role] = load_sample(wav, rate)
                 except Exception:  # noqa: BLE001
                     continue
-    return DrumKit(p.name, voices)
+    # Every sample kit answers missing roles with the synth kit — a percussion-only pack
+    # must still play a Rock groove's kick/snare/hihat, not go silent (see DrumKit.voice).
+    if np is None:
+        return DrumKit(p.name, voices)
+    return DrumKit(p.name, voices,
+                   fallback=_synth_fallback() if rate == RATE else synth_kit(rate))
+
+
+_SYNTH_FALLBACK: DrumKit | None = None
+
+
+def _synth_fallback() -> DrumKit:
+    """The shared synth kit used to voice roles a sample kit lacks (built once)."""
+    global _SYNTH_FALLBACK
+    if _SYNTH_FALLBACK is None:
+        _SYNTH_FALLBACK = synth_kit()
+    return _SYNTH_FALLBACK
 
 
 # -- patterns --------------------------------------------------------------------

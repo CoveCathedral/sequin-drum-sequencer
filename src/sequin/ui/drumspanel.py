@@ -3758,7 +3758,14 @@ class DrumsPanel(wx.Panel):
             kit = load_kit_from_folder(kit_dir, choices=self._saved_choices(sel))
             self._kit_dir = kit_dir
             self._set_kit(kit)
-            self._announce(f"Kit '{sel}' loaded: {len(kit.roles())} parts.")
+            # Say when a CORE drum is missing (kick/snare/hats) — the user should hear WHY
+            # those parts suddenly sound synthetic. Missing colour parts aren't news:
+            # almost no sample kit ships all 24, and the synth quietly covers them.
+            missing_core = [ROLE_LABELS.get(r, r) for r in CORE_ROLES
+                            if r not in kit.roles()]
+            note = (f" {', '.join(missing_core)} fall back to the synth."
+                    if missing_core else "")
+            self._announce(f"Kit '{sel}' loaded: {len(kit.roles())} parts.{note}")
         except Exception as exc:  # noqa: BLE001
             wx.MessageBox(f"Could not load kit:\n{exc}", "Drum kit", wx.ICON_ERROR)
             # _kit_dir/_kit are only updated on success, so they still name the last good

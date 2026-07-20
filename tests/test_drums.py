@@ -1237,3 +1237,20 @@ def test_songs_render_in_stereo_end_to_end():
                              44100, 0.0, 0.0, None, None, pans={"kick": -1.0})
     assert np.abs(buf[:, 0]).max() > 0 and np.abs(buf[:, 1]).max() < 1e-4
     assert np.abs(hard_r[:, 0] - hard_r[:, 1]).max() <= 2   # default kick stays centred
+
+
+def test_kit_missing_parts_falls_back_to_synth_not_silence(tmp_path):
+    # A percussion-only pack (no kick/snare/hihat) must still play a Rock groove — the
+    # synth kit answers for the roles the pack lacks. This was the long-standing "kits
+    # that don't have drums don't trigger any drum loops" bug: DrumKit.voice() returned
+    # None and the mixer skipped the whole backbone, so the loop rendered silent.
+    d = tmp_path / "PERC"
+    d.mkdir()
+    _write_int16_wav(d / "shale.wav", 0.4 * np.sin(np.arange(4410) / 3))
+    kit = drums.load_kit_from_folder(tmp_path)
+    assert kit.roles() == ["perc"]                 # honest about what the pack contains
+    assert kit.voice("kick") is not None           # ...but the synth answers for the rest
+    pcm = _frames(drums.render_loop(drums.GENRE_PATTERNS[0], kit, 120))
+    assert int(np.abs(pcm).max()) > 1000           # the groove actually sounds
+    # The synth kit itself has no fallback (it already voices everything).
+    assert drums.synth_kit().fallback is None
