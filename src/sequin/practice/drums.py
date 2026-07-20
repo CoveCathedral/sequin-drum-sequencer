@@ -23,6 +23,7 @@ import io
 import math
 import os
 import random
+import re
 import struct
 import tempfile
 import wave
@@ -856,11 +857,32 @@ class DrumKit:
     # the kit itself contains.
     fallback: "DrumKit | None" = None
 
+    #: role -> {None|LEVEL_ACCENT|LEVEL_GHOST: [voice, ...]} — dynamic layers and
+    #: round-robin pools (see layer_pools).  Optional; voice() alone stays valid.
+    variants: dict = field(default_factory=dict)
+
     def voice(self, role: str):
         v = self.voices.get(role)
         if v is None and self.fallback is not None:
             return self.fallback.voice(role)
         return v
+
+    def voice_for(self, role: str, level, nth: int):
+        """The voice for the *nth* hit of *role* at *level*.
+
+        Returns (voice, layered): a sample from the level's own pool when the kit ships
+        one (layered=True — the mixer then eases off the gain scaling, since a 'loud'
+        take is already loud), else the level falls back to the normal pool's round-robin,
+        else the plain single voice."""
+        pools = self.variants.get(role)
+        if pools:
+            pool = pools.get(level)
+            if pool:
+                return pool[nth % len(pool)], level is not None
+            pool = pools.get(None)
+            if pool:
+                return pool[nth % len(pool)], False
+        return self.voice(role), False
 
     def roles(self) -> list[str]:
         # Canonical roles in display order, then any custom line ids (mix-and-match
@@ -942,6 +964,75 @@ def wav_duration(path) -> float | None:
         return None    # an unreadable file (OSError), anything — must never crash a caller.
 
 
+# -- dynamic layers & round-robin (name-matched) -------------------------------------
+#
+# Sample packs routinely ship dynamic variants ("kick loud/medium/soft") and near-duplicate
+# takes ("hihat closed", "hihat closed2").  One sample per part wastes both: every hit is
+# the identical waveform (the machine-gun effect) and accents are just the same file played
+# louder.  These helpers read that intent straight from the filenames:
+#   - a dynamic token maps a file to the accent (loud) or ghost (soft) layer;
+#   - files sharing a family stem become a ROUND-ROBIN pool, cycled hit by hit.
+# Tokens are deliberately conservative — a wrong guess ("low" = pitch, not volume) would
+# misfile samples, so only unambiguous words count.
+
+_LAYER_LOUD = {"loud", "hard", "heavy", "accent", "strong", "ff", "fff", "smack"}
+_LAYER_SOFT = {"soft", "softly", "quiet", "ghost", "light", "pp", "ppp"}
+_LAYER_MID = {"medium", "med", "normal", "mf"}
+_POOL_CAP = 4          # variants kept per layer — plenty of life, bounded load time
+
+
+def sample_family(stem: str) -> tuple[str, str | None]:
+    """('Kick Loud 02') -> ('kick', 'accent'): the family stem with dynamic tokens and
+    trailing take-numbers stripped, plus which layer the name claims (None = normal)."""
+    tokens = re.split(r"[\s_\-]+", stem.strip().lower())
+    while tokens and tokens[-1].isdigit():
+        tokens.pop()                                   # trailing take number
+    if tokens:
+        m = re.fullmatch(r"([a-z]+)(\d+)", tokens[-1])
+        if m:
+            tokens[-1] = m.group(1)                    # "soft2" -> "soft"
+    level = None
+    kept = []
+    for tk in tokens:
+        if tk in _LAYER_LOUD:
+            level = LEVEL_ACCENT
+        elif tk in _LAYER_SOFT:
+            level = LEVEL_GHOST
+        elif tk in _LAYER_MID:
+            level = None
+        else:
+            kept.append(tk)
+    return " ".join(kept), level
+
+
+def layer_pools(files: list, chosen, anchor_normal: bool = False) -> dict | None:
+    """The chosen sample's dynamic/round-robin pools within its family.
+
+    Returns {None: [paths], LEVEL_ACCENT: [paths], LEVEL_GHOST: [paths]} (absent keys =
+    no such layer), or None when the family offers nothing beyond the single chosen file.
+    The chosen file leads the pool of the level its NAME claims ("kick loud" leads the
+    accent pool) — except with *anchor_normal* (an explicit user pick in Kit Sounds),
+    where the pick is the sound of a plain hit whatever it is called."""
+    if chosen is None:
+        return None
+    fam, chosen_level = sample_family(chosen.stem)
+    if anchor_normal:
+        chosen_level = None
+    pools: dict = {chosen_level: [chosen]}
+    for f in sorted(files):
+        if f == chosen:
+            continue
+        f_fam, f_level = sample_family(f.stem)
+        if f_fam != fam:
+            continue
+        pools.setdefault(f_level, [])
+        if len(pools[f_level]) < _POOL_CAP and f not in pools[f_level]:
+            pools[f_level].append(f)
+    if len(pools) == 1 and len(pools[None]) == 1:
+        return None
+    return pools
+
+
 def list_role_files(kit_dir) -> dict[str, list]:
     """Every .wav per recognised role in a kit directory, sorted by name.
 
@@ -972,13 +1063,21 @@ def default_sample_for(role: str, files: list):
     if not files:
         return None
     if role in _PERCUSSIVE_ROLES:
+        suitable = []
         for f in files:
             if _name_tokens(f) & _VOCAL_TOKENS:
                 continue
             dur = wav_duration(f)
             if dur is not None and dur > _MAX_DEFAULT_HIT_SECONDS:
                 continue
-            return f
+            suitable.append(f)
+        if suitable:
+            # Prefer a NEUTRAL take: a file named "loud"/"soft" is a dynamic layer for
+            # accents/ghosts (see layer_pools), not the sound of a plain hit.
+            for f in suitable:
+                if sample_family(f.stem)[1] is None:
+                    return f
+            return suitable[0]
     return files[0]
 
 
@@ -1010,6 +1109,7 @@ def load_kit_from_folder(path, rate: int = RATE, choices: dict | None = None) ->
     p = Path(path)
     choices = choices or {}
     voices: dict = {}
+    variants: dict = {}
 
     def sibling_files(kit_name: str, role: str) -> list:
         return list_role_files(p.parent / kit_name).get(role, [])
@@ -1019,6 +1119,7 @@ def load_kit_from_folder(path, rate: int = RATE, choices: dict | None = None) ->
         src_kit, chosen_name = split_kit_choice(choices.get(role))
         pool = sibling_files(src_kit, role) if src_kit else ordered
         chosen = next((w for w in pool if w.name == chosen_name), None)
+        explicit_pick = chosen is not None
         if chosen is None:
             chosen = default_sample_for(role, ordered)
         if chosen is not None:  # try the pick first, then this kit's own as fallbacks
@@ -1026,9 +1127,23 @@ def load_kit_from_folder(path, rate: int = RATE, choices: dict | None = None) ->
         for wav in ordered:
             try:
                 voices[role] = load_sample(wav, rate)
-                break
             except Exception:  # noqa: BLE001 - skip unreadable files
                 continue
+            pools = layer_pools(wavs, wav, anchor_normal=explicit_pick)
+            if pools:
+                loaded: dict = {}
+                for level, paths in pools.items():
+                    lv = []
+                    for f in paths:
+                        try:
+                            lv.append(voices[role] if f == wav else load_sample(f, rate))
+                        except Exception:  # noqa: BLE001 - a bad take just drops out
+                            continue
+                    if lv:
+                        loaded[level] = lv
+                if loaded.get(None) or len(loaded) > 1:
+                    variants[role] = loaded
+            break
     # Borrowed parts this kit has no folder of its own for (say, an 808 from another
     # kit dropped into a kit that never shipped one).
     for role, value in choices.items():
@@ -1056,7 +1171,8 @@ def load_kit_from_folder(path, rate: int = RATE, choices: dict | None = None) ->
     if np is None:
         return DrumKit(p.name, voices)
     return DrumKit(p.name, voices,
-                   fallback=_synth_fallback() if rate == RATE else synth_kit(rate))
+                   fallback=_synth_fallback() if rate == RATE else synth_kit(rate),
+                   variants=variants)
 
 
 _SYNTH_FALLBACK: DrumKit | None = None
@@ -1076,6 +1192,9 @@ def _synth_fallback() -> DrumKit:
 LEVEL_ACCENT = "accent"
 LEVEL_GHOST = "ghost"
 _LEVEL_GAIN = {None: 1.0, LEVEL_ACCENT: 1.45, LEVEL_GHOST: 0.4}
+#: Gain when the kit supplies a DEDICATED sample for the level: a "loud" take is already
+#: loud, so the mixer only nudges — full scaling on top would double-emphasize.
+_LEVEL_GAIN_LAYERED = {None: 1.0, LEVEL_ACCENT: 1.12, LEVEL_GHOST: 0.75}
 
 # -- stereo image -------------------------------------------------------------------
 #
@@ -2435,21 +2554,27 @@ def _mix_pattern(pattern: Pattern, kit: DrumKit, bpm: float, rate: int,
             _mix_wrap(left, vv * gl, off)
             _mix_wrap(right, vv * gr, off)
 
-        scaled = {None: voice}
+        scaled: dict = {}
+        nth = 0                          # round-robin position: nth PLAYED hit of this role
         for step in steps_on:
             if not 0 <= step < pattern.steps:
                 continue
             chance = role_probs.get(step) if roll is not None else None
             if chance is not None and roll.random() * 100.0 >= chance:
                 continue                 # this pass, the hit sits out
-            gain = _LEVEL_GAIN.get(role_levels.get(step), 1.0)
+            level = role_levels.get(step)
+            base, layered = kit.voice_for(role, level, nth)
+            nth += 1
+            if base is None or len(base) == 0:
+                continue
+            gain = (_LEVEL_GAIN_LAYERED if layered else _LEVEL_GAIN).get(level, 1.0)
             if rng is not None:
-                v = voice * (gain * (1.0 + rng.uniform(-1.0, 1.0) * humanize * _HUMANIZE_MAX_GAIN))
+                v = base * (gain * (1.0 + rng.uniform(-1.0, 1.0) * humanize * _HUMANIZE_MAX_GAIN))
             else:
-                level = role_levels.get(step)
-                if level not in scaled:
-                    scaled[level] = voice * gain
-                v = scaled[level]
+                key = (level, id(base))
+                if key not in scaled:
+                    scaled[key] = base * gain
+                v = scaled[key]
             if group:                    # cut the ring at the next hit in this group
                 cut = cutoffs.get((group, step))
                 if cut is not None:

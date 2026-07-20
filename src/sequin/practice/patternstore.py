@@ -244,15 +244,28 @@ def build_line_kit(lines: list[dict], kits_dir, base_kit: DrumKit | None = None)
         return v if v is not None else synth.voice(role)
 
     voices: dict = {}
+    variants: dict = {}
     for ln in lines:
         v = resolve_line_voice(ln, kits_dir, base_kit, synth, cache)
         if v is not None:
-            v = resample_pitch(v, clamp_tune(ln.get("tune")))
-            voices[ln["id"]] = scale_voice(v, gain_from_db(clamp_gain_db(ln.get("gain_db"))))
+            tune = clamp_tune(ln.get("tune"))
+            gain = gain_from_db(clamp_gain_db(ln.get("gain_db")))
+            voices[ln["id"]] = scale_voice(resample_pitch(v, tune), gain)
+            # A follow-the-kit line with no explicit sample inherits the kit's dynamic
+            # layers / round-robin pools, with the line's own tune and trim baked into
+            # every take — so accents on the main tab pull the "loud" samples too.
+            if (ln.get("kit") is None and ln.get("sample") is None and base_kit is not None
+                    and ln.get("role") in getattr(base_kit, "variants", {})):
+                pools = base_kit.variants[ln["role"]]
+                variants[ln["id"]] = {
+                    level: [scale_voice(resample_pitch(take, tune), gain) for take in pool]
+                    for level, pool in pools.items()}
     for role in ROLES:  # fill/audition fallbacks for roles no line covers
         if role not in voices:
             voices[role] = global_voice(role)
-    return DrumKit("custom", voices)
+            if base_kit is not None and role in getattr(base_kit, "variants", {}):
+                variants[role] = base_kit.variants[role]
+    return DrumKit("custom", voices, variants=variants)
 
 
 # -- built-in categories -----------------------------------------------------------

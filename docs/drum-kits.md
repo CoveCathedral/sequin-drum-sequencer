@@ -529,6 +529,25 @@ that hides the samples. Two common shapes to watch for, and the fix for each:
 If a kit shows up in the **Kit** dropdown but a part is missing or silent, this is almost
 always why.
 
+### Dynamic layers & round-robin — free realism from file names
+
+Sequin reads playing dynamics straight from sample names. Within one part's folder,
+files that share a base name form a **family**, and these words route a file to a layer:
+
+- `loud`, `hard`, `heavy`, `accent`, `ff` → played on **accented** hits
+- `soft`, `quiet`, `ghost`, `light`, `pp` → played on **ghost** notes
+- `medium`, `med`, `normal`, `mf`, or no marker → plain hits
+
+So a folder holding `kick loud.wav`, `kick medium.wav`, `kick soft.wav` gives you a kick
+whose accents and ghosts are *different recordings*, not just volume changes. And
+numbered near-duplicates — `snare 01.wav`, `snare 02.wav`, or `crash.wav` / `crash2.wav`
+— become a **round-robin pool**: consecutive hits cycle through the takes, so a run of
+sixteenths never machine-guns the identical waveform.
+
+Two notes: the words are deliberately conservative (`low` means pitch, not volume, and
+is left alone), and if you pick a specific sample in **Kit Sounds**, your pick is always
+the sound of a plain hit — name-based routing only steers the automatic choices around it.
+
 Folder names are matched **loosely and case-insensitively**, so the names sample packs
 actually ship just work — plurals (`Kicks`, `Snares`), spaced and worded names
 (`Closed Hats`, `Organic Percussions`, `808 Bass`), and keyword matches (anything with

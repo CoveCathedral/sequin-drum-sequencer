@@ -1258,3 +1258,76 @@ def test_kit_missing_parts_falls_back_to_synth_not_silence(tmp_path):
     assert int(np.abs(pcm).max()) > 1000           # the groove actually sounds
     # The synth kit itself has no fallback (it already voices everything).
     assert drums.synth_kit().fallback is None
+
+
+# -- dynamic layers & round-robin ---------------------------------------------------
+
+def _layer_kit(tmp_path):
+    """kick loud/medium/soft (distinct freqs as fingerprints) + two snare takes."""
+    for folder, name, freq in (("KICK", "kick loud.wav", 900.0),
+                               ("KICK", "kick medium.wav", 500.0),
+                               ("KICK", "kick soft.wav", 200.0),
+                               ("SNARE", "snare 01.wav", 1500.0),
+                               ("SNARE", "snare 02.wav", 2500.0)):
+        d = tmp_path / folder
+        d.mkdir(exist_ok=True)
+        _write_int16_wav(d / name, 0.5 * np.sin(2 * np.pi * freq * np.arange(8820) / 44100))
+    return drums.load_kit_from_folder(tmp_path)
+
+
+def _dom_hz(buf):
+    mono = buf[:, 0] + buf[:, 1]
+    return float(np.argmax(np.abs(np.fft.rfft(mono)))) * 44100 / len(mono)
+
+
+def test_sample_family_reads_dynamics_conservatively():
+    assert drums.sample_family("kick loud") == ("kick", drums.LEVEL_ACCENT)
+    assert drums.sample_family("Kick_Hard_03") == ("kick", drums.LEVEL_ACCENT)
+    assert drums.sample_family("crash soft1") == ("crash", drums.LEVEL_GHOST)
+    assert drums.sample_family("hihat closed2") == ("hihat closed", None)
+    # "low" is PITCH, not volume — a wrong guess would misfile samples.
+    assert drums.sample_family("tom low") == ("tom low", None)
+
+
+def test_dynamic_layers_map_accent_and_ghost_to_their_takes(tmp_path):
+    kit = _layer_kit(tmp_path)
+    assert set(kit.variants["kick"]) == {None, drums.LEVEL_ACCENT, drums.LEVEL_GHOST}
+    for level, want in ((drums.LEVEL_ACCENT, 900.0), (None, 500.0),
+                        (drums.LEVEL_GHOST, 200.0)):
+        p = drums.Pattern("t", 4, 4, {"kick": [0]},
+                          levels={"kick": {0: level}} if level else {})
+        buf = drums._mix_pattern(p, kit, 120.0, 44100, 0.0, 0.0, None, None)
+        assert abs(_dom_hz(buf[:8820]) - want) < 30, level
+    # A dedicated take is already loud/soft: the mixer eases the gain instead of stacking
+    # the full accent scaling on top.
+    assert drums._LEVEL_GAIN_LAYERED[drums.LEVEL_ACCENT] < drums._LEVEL_GAIN[drums.LEVEL_ACCENT]
+
+
+def test_round_robin_alternates_takes_deterministically(tmp_path):
+    kit = _layer_kit(tmp_path)
+    p = drums.Pattern("t", 8, 4, {"snare": [0, 4]})
+    buf = drums._mix_pattern(p, kit, 120.0, 44100, 0.0, 0.0, None, None)
+    step = int(round(4 * p.step_seconds(120.0) * 44100))
+    first, second = _dom_hz(buf[:step]), _dom_hz(buf[step:2 * step])
+    assert abs(first - 1500.0) < 40 and abs(second - 2500.0) < 40   # different takes
+    assert (drums.render_loop(p, kit, 120, humanize=0.0)
+            == drums.render_loop(p, kit, 120, humanize=0.0))        # still deterministic
+
+
+def test_explicit_pick_stays_the_plain_sound(tmp_path):
+    # If the user chose "kick loud" in Kit Sounds, plain hits play THEIR pick — the
+    # name-claimed layer only reroutes auto-defaults.
+    kit = drums.load_kit_from_folder(tmp_path if (tmp_path / "KICK").is_dir()
+                                     else _layer_kit(tmp_path) and tmp_path,
+                                     choices={"kick": "kick loud.wav"})
+    p = drums.Pattern("t", 4, 4, {"kick": [0]})
+    buf = drums._mix_pattern(p, kit, 120.0, 44100, 0.0, 0.0, None, None)
+    assert abs(_dom_hz(buf[:8820]) - 900.0) < 30
+
+
+def test_line_kit_inherits_layers_for_follow_global_lines(tmp_path):
+    from sequin.practice import patternstore as ps
+    base = _layer_kit(tmp_path)
+    lines = [dict(ps.make_line("kick"), steps=[0])]
+    lk = ps.build_line_kit(lines, tmp_path, base_kit=base)
+    assert lines[0]["id"] in lk.variants or "kick" in lk.variants
