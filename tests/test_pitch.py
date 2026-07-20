@@ -40,8 +40,14 @@ def test_pitched_drums_resolve_to_a_note():
 
 
 def test_noise_drums_read_unpitched():
-    # Hats and cymbals are noise: no confident fundamental.
-    for synth in (drums.synth_hihat, drums.synth_openhat, drums.synth_crash):
+    # Hats and cymbals must never report a key. The 808-lineage hats are genuinely
+    # quasi-tonal now, so the contract is enforced per ROLE (the app always passes one —
+    # see line_pitch); cymbals stay unpitched on confidence alone either way.
+    for synth, role in ((drums.synth_hihat, "hihat"), (drums.synth_openhat, "openhat"),
+                        (drums.synth_crash, "crash")):
+        p = estimate_pitch(synth(drums.RATE), drums.RATE, role=role)
+        assert p is None or not p.pitched
+    for synth in (drums.synth_openhat, drums.synth_crash):   # noise even with no role
         p = estimate_pitch(synth(drums.RATE), drums.RATE)
         assert p is None or not p.pitched
 

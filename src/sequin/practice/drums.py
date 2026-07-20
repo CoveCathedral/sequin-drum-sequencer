@@ -291,172 +291,498 @@ def _t(seconds: float, rate: int) -> "np.ndarray":
     return np.linspace(0, seconds, int(rate * seconds), endpoint=False, dtype=np.float64)
 
 
+# -- synthesis primitives ----------------------------------------------------------
+#
+# Offline rendering is the whole design advantage here: voices are built once and
+# cached, so a cymbal can afford ~500 partials and every filter can be a clean
+# FFT-domain shape instead of a real-time compromise.
+
+def _attack(x: "np.ndarray", rate: int, secs: float) -> "np.ndarray":
+    """Raised-cosine fade-in — kills the DC pop of a hard start."""
+    n = min(len(x), max(1, int(secs * rate)))
+    x = x.copy()
+    x[:n] *= 0.5 - 0.5 * np.cos(np.pi * np.arange(n) / n)
+    return x
+
+
+def _endfade(x: "np.ndarray", rate: int, secs: float) -> "np.ndarray":
+    """Cosine fade-out at the tail so retriggered/looped voices never click."""
+    n = min(len(x), max(1, int(secs * rate)))
+    x = x.copy()
+    x[-n:] *= 0.5 + 0.5 * np.cos(np.pi * np.arange(n) / n)
+    return x
+
+
+def _sweep_sine(t: "np.ndarray", rate: int, f0: float, drop: float,
+                drop_tau: float) -> "np.ndarray":
+    """A sine whose frequency starts at f0*(1+drop) and settles EXPONENTIALLY to f0 —
+    the struck-membrane pitch bend.  Exponential-and-fast is what reads as a hit."""
+    freq = f0 * (1.0 + drop * np.exp(-t / drop_tau))
+    return np.sin(2 * np.pi * np.cumsum(freq) / rate)
+
+
+def _bl_square(t: "np.ndarray", f: float, rate: int,
+               jitter: float = 0.0, seed: int = 0) -> "np.ndarray":
+    """A bandlimited square (odd harmonics, 1/n) — sign(sin) would alias into hash.
+    *jitter* detunes each harmonic slightly: the comb loses exact periodicity, which both
+    de-machines the tone and keeps the pitch estimator from calling a hat a note."""
+    rng = np.random.default_rng(seed) if jitter else None
+    x = np.zeros(len(t), dtype=np.float64)
+    n = 1
+    while n * f < rate * 0.45:
+        fn = n * f * (1.0 + rng.uniform(-jitter, jitter)) if rng is not None else n * f
+        x += np.sin(2 * np.pi * fn * t) / n
+        n += 2
+    return x
+
+
+def _smoothstep(f: "np.ndarray", lo: float, hi: float) -> "np.ndarray":
+    s = np.clip((f - lo) / max(1e-9, hi - lo), 0.0, 1.0)
+    return s * s * (3.0 - 2.0 * s)
+
+
+def _fft_shape(x: "np.ndarray", rate: int, lo: float | None = None,
+               hi: float | None = None, peak_hz: float | None = None,
+               peak_gain: float = 1.0, peak_q: float = 1.0) -> "np.ndarray":
+    """Offline spectral shaping: smooth (half-octave) high/low-pass edges plus an
+    optional resonant bump — one clean tool instead of stacked crude filters."""
+    spec = np.fft.rfft(x)
+    f = np.fft.rfftfreq(len(x), 1.0 / rate)
+    g = np.ones(len(f))
+    if lo is not None:
+        g *= _smoothstep(f, lo * 0.6, lo * 1.2)
+    if hi is not None:
+        g *= 1.0 - _smoothstep(f, hi * 0.85, hi * 1.7)
+    if peak_hz is not None:
+        with np.errstate(divide="ignore"):
+            lf = np.where(f > 0, np.log(np.maximum(f, 1e-9) / peak_hz), -20.0)
+        g *= 1.0 + (peak_gain - 1.0) * np.exp(-0.5 * (lf * 2.0 * peak_q) ** 2)
+    return np.fft.irfft(spec * g, n=len(x))
+
+
+def _shaped_noise(seed: int, t: "np.ndarray", rate: int, lo: float | None = None,
+                  hi: float | None = None, tau: float = 0.05,
+                  dur: float | None = None, peak_hz: float | None = None,
+                  peak_gain: float = 1.0) -> "np.ndarray":
+    """Band-shaped noise with an exponential decay, unit peak (so mix levels in the
+    voice recipes mean what they say).  *dur* hard-limits a burst (clicks, chiffs)."""
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-1.0, 1.0, len(t))
+    x = _fft_shape(x, rate, lo=lo, hi=hi, peak_hz=peak_hz, peak_gain=peak_gain,
+                   peak_q=1.5)
+    env = np.exp(-t / tau)
+    if dur is not None:
+        late = t > dur
+        env[late] *= np.exp(-(t[late] - dur) / 0.001)
+    x = x * env
+    m = float(np.max(np.abs(x)))
+    return x / m if m > 0 else x
+
+
+def _sat_even(x: "np.ndarray", drive: float, dc: float) -> "np.ndarray":
+    """tanh saturation with a small DC offset so EVEN harmonics appear (warmth/body);
+    the offset is subtracted back out afterwards."""
+    m = float(np.max(np.abs(x)))
+    if m > 0:
+        x = x / m
+    y = np.tanh(drive * (x + dc))
+    return y - float(np.mean(y))
+
+
 def synth_kick(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.18, rate)
-    freq = 45.0 + 120.0 * np.exp(-t * 32.0)           # pitch drop ~165 -> 45 Hz
-    phase = 2 * np.pi * np.cumsum(freq) / rate
-    body = np.sin(phase) * np.exp(-t * 18.0)
-    click = np.exp(-t * 450.0) * 0.6                  # beater transient
-    return _norm(0.9 * body + click)
+    """FM-school kick: sine fundamental with a fast exponential pitch drop, beater click,
+    even-harmonic warmth.  The drop being exponential and FAST is the punch."""
+    t = _t(0.45, rate)
+    body = _sweep_sine(t, rate, 55.0, drop=2.6, drop_tau=0.018)
+    body += 0.12 * _sweep_sine(t, rate, 110.0, drop=2.6, drop_tau=0.018)
+    body *= np.exp(-t / 0.120)
+    click = _shaped_noise(101, t, rate, lo=2000.0, tau=0.0015, dur=0.003) * 0.3
+    x = _sat_even(body + click, drive=1.8, dc=0.05)
+    return _norm(_attack(x, rate, 0.004))
 
 
-def synth_snare(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.2, rate)
-    rng = np.random.default_rng(1)
-    tone = np.sin(2 * np.pi * 180.0 * t) * np.exp(-t * 22.0)
-    noise = (rng.random(len(t)) * 2 - 1) * np.exp(-t * 16.0)
-    return _norm(0.4 * tone + 0.85 * noise)
+#: Membrane-mode table shared by every tom (ideal circular-membrane Bessel ratios).
+#: One physical model, five voicings — that's what makes the set read as one kit.
+_MEMBRANE_RATIOS = (1.0, 1.593, 2.135, 2.295, 2.653, 2.917, 3.155)
+_MEMBRANE_DECAY_SCALE = (1.0, 0.55, 0.40, 0.35, 0.28, 0.22, 0.18)
 
-
-def synth_hihat(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.05, rate)
-    rng = np.random.default_rng(2)
-    noise = rng.random(len(t)) * 2 - 1
-    noise = np.diff(noise, prepend=0.0)               # crude high-pass -> metallic
-    return _norm(noise * np.exp(-t * 90.0))
-
-
-def synth_openhat(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.3, rate)
-    rng = np.random.default_rng(3)
-    noise = rng.random(len(t)) * 2 - 1
-    noise = np.diff(noise, prepend=0.0)
-    return _norm(noise * np.exp(-t * 9.0))
-
-
-def synth_clap(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.25, rate)
-    rng = np.random.default_rng(4)
-    noise = rng.random(len(t)) * 2 - 1
-    env = np.zeros(len(t))
-    for delay in (0.0, 0.010, 0.020):                 # three quick bursts + a tail
-        k = int(delay * rate)
-        env[k:] += np.exp(-(t[: len(t) - k]) * 120.0)
-    env += 0.4 * np.exp(-t * 18.0)
-    return _norm(noise * env)
-
-
-def synth_808(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.6, rate)
-    freq = 52.0 + 30.0 * np.exp(-t * 20.0)            # slight drop into a sub tone
-    phase = 2 * np.pi * np.cumsum(freq) / rate
-    return _norm(np.sin(phase) * np.exp(-t * 5.0))
-
-
-def synth_tom(rate: int = RATE, base: float = 90.0, decay: float = 12.0,
-              secs: float = 0.25) -> "np.ndarray":
-    """A pitched tom.  *base* is the settled fundamental (high tom ~150, floor ~70); the
-    pitch drops from twice that as the head rings, like a real struck drum."""
-    t = _t(secs, rate)
-    freq = base + base * np.exp(-t * 9.0)
-    phase = 2 * np.pi * np.cumsum(freq) / rate
-    return _norm(np.sin(phase) * np.exp(-t * decay))
-
-
-#: The five toms, high to low, as (role, settled-fundamental-Hz, decay, seconds).
-#: The mid tom uses the exact pre-expansion synth_tom defaults (90 Hz, decay 12, 0.25 s)
-#: so the legacy "tom" role stays byte-identical for the shipped library and saved patterns.
+#: The five toms, high to low: settled fundamental Hz, fundamental decay tau (s), length,
+#: per-mode amps (trimmed toward the floor tom — big heads are darker), stick-click
+#: high-pass Hz and level, and the strike pitch-bend (amount, tau s).  Evenly log-spaced
+#: 87..220 Hz so the run sounds like one instrument.
 _TOM_VOICES = {
-    "tom1": (150.0, 14.0, 0.22),   # high rack tom
-    "tom2": (118.0, 13.0, 0.24),
-    "tom":  (90.0, 12.0, 0.25),    # legacy mid tom — unchanged from before the expansion
-    "tom4": (74.0, 11.0, 0.30),
-    "tom5": (60.0, 9.0, 0.38),     # floor tom
+    "tom1": (220.0, 0.090, 0.30, (1.0, 0.50, 0.35, 0.30, 0.22, 0.15, 0.10), 1500.0, 0.40, 0.20, 0.012),
+    "tom2": (175.0, 0.110, 0.34, (1.0, 0.50, 0.35, 0.30, 0.22, 0.15, 0.08), 1400.0, 0.37, 0.19, 0.013),
+    "tom":  (138.0, 0.130, 0.40, (1.0, 0.50, 0.35, 0.30, 0.22, 0.13, 0.06), 1200.0, 0.33, 0.18, 0.014),
+    "tom4": (110.0, 0.160, 0.48, (1.0, 0.48, 0.32, 0.28, 0.20, 0.0, 0.0), 1000.0, 0.30, 0.16, 0.016),
+    "tom5": (87.0, 0.210, 0.62, (1.0, 0.45, 0.28, 0.24, 0.0, 0.0, 0.0), 900.0, 0.28, 0.15, 0.018),
 }
 
 
+def _membrane(rate: int, f0: float, tau_f: float, secs: float, mode_amps,
+              click_hz: float, click_amp: float, drop: float, drop_tau: float,
+              drive: float = 1.5, dc: float = 0.045) -> "np.ndarray":
+    """A struck drumhead: the Bessel mode bank over one strike pitch-bend, plus a stick
+    click.  The non-integer upper modes are what stop it sounding like a sine beep."""
+    t = _t(secs, rate)
+    x = np.zeros(len(t), dtype=np.float64)
+    for ratio, scale, amp in zip(_MEMBRANE_RATIOS, _MEMBRANE_DECAY_SCALE, mode_amps):
+        if amp <= 0.0:
+            continue
+        x += amp * _sweep_sine(t, rate, f0 * ratio, drop, drop_tau) * np.exp(-t / (tau_f * scale))
+    x += _shaped_noise(103, t, rate, lo=click_hz, tau=0.002, dur=0.003) * click_amp
+    x = _sat_even(x, drive=drive, dc=dc)
+    return _norm(_attack(x, rate, 0.003))
+
+
+def synth_tom(rate: int = RATE, base: float = 98.0, decay: float | None = None,
+              secs: float | None = None) -> "np.ndarray":
+    """A pitched membrane tom at *base* Hz.  *decay*/*secs* keep the legacy call shape:
+    decay is the old exponential rate (tau = 1/decay) when given; both default to values
+    derived from the drum's size (lower drums ring longer)."""
+    tau_f = (1.0 / decay) if decay else float(np.interp(base, (87.0, 220.0), (0.21, 0.09)))
+    length = secs if secs else float(np.interp(base, (87.0, 220.0), (0.62, 0.30)))
+    amps = (1.0, 0.48, 0.32, 0.28, 0.20, 0.10, 0.05)
+    click_hz = float(np.interp(base, (87.0, 220.0), (900.0, 1500.0)))
+    return _membrane(rate, base, tau_f, length, amps, click_hz, 0.33,
+                     drop=float(np.interp(base, (87.0, 220.0), (0.15, 0.20))),
+                     drop_tau=float(np.interp(base, (87.0, 220.0), (0.018, 0.012))))
+
+
+def synth_808(rate: int = RATE) -> "np.ndarray":
+    """A long tuned sub.  Parallel saturation: the clean sine keeps the pitch estimator
+    locked; the driven copy adds the harmonics that survive laptop speakers."""
+    t = _t(1.2, rate)
+    clean = _sweep_sine(t, rate, 50.0, drop=0.06, drop_tau=0.020) * np.exp(-t / 0.350)
+    click = _shaped_noise(104, t, rate, lo=2000.0, tau=0.0012, dur=0.002) * 0.18
+    x = 0.65 * clean + 0.35 * np.tanh(2.5 * clean) + click
+    return _norm(_attack(x, rate, 0.006))
+
+
+def synth_snare(rate: int = RATE) -> "np.ndarray":
+    """Coupled membrane modes (detuned pairs that beat) + TWO wire layers: a fast HF snap
+    and a mid buzz that outlives the body.  One flat noise burst is the classic mistake."""
+    t = _t(0.32, rate)
+    body = np.zeros(len(t), dtype=np.float64)
+    modes = ((185.0, 1.00, 0.090), (189.0, 0.90, 0.090),   # (0,1) coupled pair — beats
+             (294.0, 0.70, 0.200), (298.0, 0.63, 0.200),   # (1,1) pair
+             (396.0, 0.50, 0.170), (426.0, 0.40, 0.150), (490.0, 0.30, 0.130),
+             (540.0, 0.25, 0.110), (585.0, 0.15, 0.090), (648.0, 0.15, 0.090))
+    rng = np.random.default_rng(105)
+    for f, a, tau in modes:
+        body += a * np.sin(2 * np.pi * f * t + rng.uniform(0, 2 * np.pi)) * np.exp(-t / tau)
+    snap = _shaped_noise(106, t, rate, lo=2000.0, hi=8000.0, tau=0.055)
+    buzz = _shaped_noise(107, t, rate, lo=1000.0, hi=6000.0, tau=0.220,
+                         peak_hz=2500.0, peak_gain=2.0)
+    x = 0.9 * body + 1.0 * (0.5 * snap + 0.5 * buzz)
+    x = np.tanh(1.2 * x)
+    x = _fft_shape(x, rate, lo=120.0)
+    return _norm(_attack(x, rate, 0.0007))
+
+
 def synth_rimshot(rate: int = RATE) -> "np.ndarray":
-    """A tight side-stick / rimshot: a short woody tone with a sharp click, very short."""
-    t = _t(0.06, rate)
-    tone = np.sin(2 * np.pi * 420.0 * t) * np.exp(-t * 55.0)
-    click = np.exp(-t * 800.0) * 0.7
-    return _norm(0.6 * tone + click, 0.85)
+    """A dry woody knock: ~90% transient, a fast inharmonic ring under 80 ms, bright
+    click on top.  Near-harmonic ratios would make it 'boing' — these are not."""
+    t = _t(0.08, rate)
+    x = np.zeros(len(t), dtype=np.float64)
+    for f, a, tau in ((415.0, 1.0, 0.055), (790.0, 0.55, 0.045), (1720.0, 0.35, 0.030),
+                      (2600.0, 0.20, 0.020), (4100.0, 0.10, 0.012)):
+        x += a * np.sin(2 * np.pi * f * t) * np.exp(-t / tau)
+    x += _shaped_noise(108, t, rate, lo=2000.0, tau=0.003, dur=0.004) * 0.4
+    x = _fft_shape(x, rate, lo=200.0)
+    return _norm(_attack(x, rate, 0.0005), 0.85)
+
+
+def synth_clap(rate: int = RATE) -> "np.ndarray":
+    """The 808 clap architecture: three DIMINISHING, slightly irregular bursts, then one
+    diffuse ~100 ms tail, everything through a shared ~1 kHz bandpass."""
+    t = _t(0.15, rate)
+    rng = np.random.default_rng(109)
+    noise = rng.uniform(-1.0, 1.0, len(t))
+    env = np.zeros(len(t))
+    for delay, amp in ((0.0, 1.0), (0.010, 0.8), (0.020, 0.65)):
+        d = delay + rng.uniform(-0.0015, 0.0015) if delay else 0.0
+        a = amp * (1.0 + rng.uniform(-0.1, 0.1))
+        k = max(0, int(d * rate))
+        env[k:] = np.maximum(env[k:], a * np.exp(-t[: len(t) - k] / 0.009))
+    k = int(0.022 * rate)
+    env[k:] = np.maximum(env[k:], 0.5 * np.exp(-t[: len(t) - k] / 0.100))
+    x = _fft_shape(noise * env, rate, lo=600.0, hi=3000.0, peak_hz=1000.0,
+                   peak_gain=2.0, peak_q=1.5)
+    return _norm(x)
+
+
+# -- the hat/cymbal metal core ------------------------------------------------------
+
+#: The measured TR-808 metal oscillator frequencies (Hz).
+_METAL_FREQS = (800.0, 540.0, 522.7, 369.6, 304.4, 205.3)
+
+_metal_core_cache: dict = {}
+
+
+def _metal_core(rate: int, secs: float) -> "np.ndarray":
+    """The shared six-square inharmonic comb all three hats are carved from, densified
+    with ring-mod sum/difference partials.  Closed, pedal and open MUST share this or
+    they sound like unrelated instruments."""
+    key = (rate, round(secs, 3))
+    if key in _metal_core_cache:
+        return _metal_core_cache[key]
+    t = _t(secs, rate)
+    x = np.zeros(len(t), dtype=np.float64)
+    for f in _METAL_FREQS:
+        taper = 0.79 if f >= 540.0 else 1.0        # keep the comb from going top-heavy
+        x += taper * _bl_square(t, f, rate, jitter=0.012, seed=int(f))
+    rng = np.random.default_rng(110)
+    freqs = list(_METAL_FREQS)
+    for i in range(len(freqs)):                    # ring-mod products fill the spectrum
+        for j in range(i + 1, len(freqs)):
+            for f in (freqs[i] + freqs[j], abs(freqs[i] - freqs[j])):
+                if 100.0 < f < 18000.0:
+                    x += 0.12 * np.sin(2 * np.pi * f * (1 + rng.uniform(-0.01, 0.01)) * t)
+    _metal_core_cache[key] = x
+    return x
+
+
+def synth_hihat(rate: int = RATE) -> "np.ndarray":
+    t = _t(0.12, rate)
+    x = _hat_carve(_metal_core(rate, 0.12), rate)
+    x = x * np.exp(-t / 0.011)                     # the 808 service-manual 50 ms fall
+    x = _fft_shape(x, rate, lo=7500.0)             # VCA then HPF — the 808 topology
+    x += _shaped_noise(111, t, rate, lo=6000.0, tau=0.006) * 0.35
+    return _norm(_attack(x, rate, 0.0007))
 
 
 def synth_pedalhat(rate: int = RATE) -> "np.ndarray":
-    """A closed pedal hi-hat: like the closed hat but shorter and a touch duller."""
-    t = _t(0.04, rate)
-    rng = np.random.default_rng(11)
-    noise = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0)
-    return _norm(noise * np.exp(-t * 120.0), 0.8)
+    """Not a quieter closed hat: duller (lower HPF), shorter, more noise-dominant."""
+    t = _t(0.06, rate)
+    x = _hat_carve(_metal_core(rate, 0.06), rate)
+    x = x * np.exp(-t / 0.007)
+    x = _fft_shape(x, rate, lo=5500.0, hi=12000.0)
+    x += _shaped_noise(112, t, rate, lo=5000.0, tau=0.0045) * 0.35
+    return _norm(_attack(x, rate, 0.0005), 0.8)
 
 
-def synth_crash2(rate: int = RATE) -> "np.ndarray":
-    """A second crash — a hair darker and longer than crash 1 (different seed/decay)."""
-    t = _t(1.25, rate)
-    rng = np.random.default_rng(7)
-    noise = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0)
-    return _norm(noise * np.exp(-t * 2.6), 0.72)
-
-
-def synth_splash(rate: int = RATE) -> "np.ndarray":
-    """A splash cymbal: bright and very fast-decaying."""
-    t = _t(0.45, rate)
-    rng = np.random.default_rng(8)
-    noise = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0)
-    return _norm(noise * np.exp(-t * 8.0), 0.7)
-
-
-def synth_china(rate: int = RATE) -> "np.ndarray":
-    """A china / trashy crash: a rougher, noisier wash with a slower onset."""
-    t = _t(1.0, rate)
-    rng = np.random.default_rng(9)
-    noise = rng.random(len(t)) * 2 - 1
-    noise = noise + 0.5 * np.diff(noise, prepend=0.0)      # trashier than a clean crash
-    return _norm(noise * np.exp(-t * 3.2), 0.72)
-
-
-def synth_ridebell(rate: int = RATE) -> "np.ndarray":
-    """A ride bell: a strong pingy fundamental with a metallic overtone."""
+def synth_openhat(rate: int = RATE) -> "np.ndarray":
     t = _t(0.7, rate)
-    ping = np.sin(2 * np.pi * 640.0 * t) + 0.5 * np.sin(2 * np.pi * 1180.0 * t)
-    return _norm(ping * np.exp(-t * 6.0), 0.7)
+    x = _hat_carve(_metal_core(rate, 0.7), rate)
+    x = x * (0.55 * np.exp(-t / 0.020) + 0.45 * np.exp(-t / 0.105))   # chih, then sizzle
+    x = _fft_shape(x, rate, lo=7000.0)
+    x += _shaped_noise(113, t, rate, lo=6000.0, hi=12000.0, tau=0.090) * 0.25
+    return _norm(_endfade(_attack(x, rate, 0.0005), rate, 0.02))
 
 
-def synth_cowbell(rate: int = RATE) -> "np.ndarray":
-    """A cowbell: two detuned square-ish tones, short and clanky."""
-    t = _t(0.35, rate)
-    a = np.sign(np.sin(2 * np.pi * 540.0 * t))
-    b = np.sign(np.sin(2 * np.pi * 800.0 * t))
-    return _norm((0.5 * a + 0.5 * b) * np.exp(-t * 12.0), 0.6)
+def _hat_carve(core: "np.ndarray", rate: int) -> "np.ndarray":
+    """The 808's cascaded bandpass shaping, shared by all three hats."""
+    a = _fft_shape(core, rate, lo=3000.0, hi=11000.0, peak_hz=7100.0, peak_gain=2.0,
+                   peak_q=1.2)
+    b = _fft_shape(core, rate, lo=1500.0, hi=6000.0, peak_hz=3440.0, peak_gain=2.0,
+                   peak_q=1.2)
+    return a + 0.3 * b
 
 
-def synth_tambourine(rate: int = RATE) -> "np.ndarray":
-    """A tambourine: a burst of bright jingles (high, fast-decaying noise)."""
-    t = _t(0.3, rate)
-    rng = np.random.default_rng(12)
-    noise = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0)
-    jingle = noise * (np.exp(-t * 20.0) + 0.4 * np.exp(-t * 6.0))
-    return _norm(jingle, 0.7)
+# -- cymbals: dense inharmonic partial banks ----------------------------------------
 
-
-def synth_shaker(rate: int = RATE) -> "np.ndarray":
-    """A shaker: a soft, filtered noise 'chk' with a gentle swell."""
-    t = _t(0.12, rate)
-    rng = np.random.default_rng(13)
-    noise = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0)
-    env = np.exp(-((t - 0.03) ** 2) / (2 * 0.02 ** 2))     # soft bell-shaped burst
-    return _norm(noise * env, 0.55)
+def _cymbal_bank(rate: int, secs: float, seed: int, n: int, flo: float, fhi: float,
+                 peak_hz: float, t60_ref: float, f_ref: float, d: float,
+                 pairs: int = 40, pair_detune=(0.5, 5.0), boost=None) -> "np.ndarray":
+    """A plate: *n* random inharmonic partials, each with its own decay — high modes die
+    first (t60(f) = t60_ref*(f_ref/f)^d).  Shared decay or harmonic spacing are the two
+    mistakes that turn a cymbal into gated hiss or an organ."""
+    rng = np.random.default_rng(seed)
+    freqs = rng.uniform(flo, fhi, n)
+    if pairs:                                      # close-detuned pairs shimmer/beat
+        twins = freqs[:pairs] + rng.uniform(*pair_detune, pairs)
+        freqs = np.concatenate([freqs, twins])
+    lo_f = np.log(freqs)
+    amps = np.exp(-0.5 * ((lo_f - np.log(peak_hz)) / 0.9) ** 2) + 0.15
+    amps *= (f_ref / freqs) ** 0.15                # a gentle 1/f tilt under the peak
+    if boost is not None:
+        amps *= boost(freqs)
+    t60 = t60_ref * (f_ref / freqs) ** d
+    t60 *= 1.0 + rng.uniform(-0.1, 0.1, len(freqs))
+    taus = np.clip(t60 / 6.9, 0.02, secs)
+    phases = rng.uniform(0, 2 * np.pi, len(freqs))
+    t = _t(secs, rate).astype(np.float32)
+    x = np.zeros(len(t), dtype=np.float32)
+    fs, am, ph, ta = (a.astype(np.float32) for a in (freqs, amps, phases, taus))
+    for k0 in range(0, len(fs), 256):              # block-accumulate: memory stays flat
+        blk = slice(k0, k0 + 256)
+        x += (am[blk, None]
+              * np.sin(2 * np.float32(np.pi) * fs[blk, None] * t[None, :] + ph[blk, None])
+              * np.exp(-t[None, :] / ta[blk, None])).sum(axis=0)
+    return x.astype(np.float64)
 
 
 def synth_crash(rate: int = RATE) -> "np.ndarray":
-    t = _t(1.1, rate)
-    rng = np.random.default_rng(5)
-    noise = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0)  # bright wash
-    return _norm(noise * np.exp(-t * 3.0), 0.75)
+    t = _t(2.8, rate)
+    x = _cymbal_bank(rate, 2.8, seed=120, n=380, flo=300.0, fhi=16000.0,
+                     peak_hz=5500.0, t60_ref=3.5, f_ref=500.0, d=0.7)
+    x += _shaped_noise(121, t, rate, lo=2000.0, tau=0.012, dur=0.04) * 0.5 * np.max(np.abs(x))
+    x += _shaped_noise(122, t, rate, lo=6000.0, tau=0.087) * 0.12 * np.max(np.abs(x))
+    return _norm(_endfade(_attack(x, rate, 0.0015), rate, 0.005), 0.75)
+
+
+def synth_crash2(rate: int = RATE) -> "np.ndarray":
+    """Independently seeded, bigger and darker — a shifted copy of crash 1 would mean the
+    kit effectively ships one crash."""
+    t = _t(3.4, rate)
+    big = lambda f: np.where(f < 900.0, 1.6, 1.0)  # noqa: E731 - low-mid bloom
+    x = _cymbal_bank(rate, 3.4, seed=123, n=360, flo=250.0, fhi=14000.0,
+                     peak_hz=4000.0, t60_ref=4.5, f_ref=500.0, d=0.65, boost=big)
+    x += _shaped_noise(124, t, rate, lo=1500.0, tau=0.018, dur=0.05) * 0.45 * np.max(np.abs(x))
+    return _norm(_endfade(_attack(x, rate, 0.0015), rate, 0.005), 0.72)
+
+
+def synth_splash(rate: int = RATE) -> "np.ndarray":
+    """A small plate is not a short crash: the WHOLE spectrum sits higher."""
+    t = _t(0.8, rate)
+    x = _cymbal_bank(rate, 0.8, seed=125, n=180, flo=700.0, fhi=16000.0,
+                     peak_hz=7500.0, t60_ref=0.7, f_ref=1000.0, d=0.8, pairs=12)
+    x += _shaped_noise(126, t, rate, lo=3000.0, tau=0.006, dur=0.015) * 0.5 * np.max(np.abs(x))
+    return _norm(_endfade(_attack(x, rate, 0.001), rate, 0.003), 0.7)
+
+
+def synth_china(rate: int = RATE) -> "np.ndarray":
+    """Trash is ROUGHNESS, not brightness: close-detuned pairs + saturation so the
+    partials intermodulate into buzz."""
+    t = _t(1.4, rate)
+    clang = lambda f: np.where(f < 650.0, 2.2, 1.0)  # noqa: E731
+    x = _cymbal_bank(rate, 1.4, seed=127, n=260, flo=250.0, fhi=12000.0,
+                     peak_hz=3200.0, t60_ref=1.2, f_ref=500.0, d=0.9,
+                     pairs=90, pair_detune=(4.0, 18.0), boost=clang)
+    x += _shaped_noise(128, t, rate, lo=1000.0, tau=0.012, dur=0.03) * 0.6 * np.max(np.abs(x))
+    x = np.tanh(2.0 * x / max(1e-9, np.max(np.abs(x))))
+    x = _fft_shape(x, rate, lo=200.0)
+    return _norm(_endfade(_attack(x, rate, 0.001), rate, 0.004), 0.72)
 
 
 def synth_ride(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.6, rate)
-    rng = np.random.default_rng(6)
-    ping = np.sin(2 * np.pi * 950.0 * t) * np.exp(-t * 9.0)
-    shimmer = np.diff(rng.random(len(t)) * 2 - 1, prepend=0.0) * np.exp(-t * 7.0)
-    return _norm(0.55 * ping + 0.45 * shimmer, 0.7)
+    """The identity is the isolated stick PING over a SPARSE shimmer bed — a crash-dense
+    wash smears the articulation that makes it a ride."""
+    t = _t(3.0, rate)
+    lows = lambda f: np.where(f < 600.0, 3.0, 1.0)  # noqa: E731 - the ride's 'note'
+    wash = _cymbal_bank(rate, 3.0, seed=129, n=240, flo=200.0, fhi=15000.0,
+                        peak_hz=3500.0, t60_ref=4.5, f_ref=500.0, d=0.55,
+                        pairs=25, boost=lows) * 0.5
+    ping = np.zeros(len(t))
+    for f, a in ((4200.0, 0.5), (4700.0, 0.35), (5300.0, 0.25)):
+        ping += a * np.sin(2 * np.pi * f * t) * np.exp(-t / 0.060)
+    ping += 0.18 * np.sin(2 * np.pi * 420.0 * t) * np.exp(-t / 0.080)   # bow 'thunk'
+    ping += _shaped_noise(130, t, rate, lo=4000.0, tau=0.005, dur=0.006) * 0.6
+    x = wash / max(1e-9, np.max(np.abs(wash))) * 0.5 + ping
+    return _norm(_endfade(_attack(x, rate, 0.001), rate, 0.005), 0.7)
+
+
+def synth_ridebell(rate: int = RATE) -> "np.ndarray":
+    """The cup pings: a small INHARMONIC bell-mode set with a dominant prime + hum, so
+    the fundamental stays clean enough to tune by ear."""
+    t = _t(2.2, rate)
+    f0 = 520.0
+    x = np.zeros(len(t), dtype=np.float64)
+    modes = ((0.503, 0.45, 0.22), (1.0, 1.00, 0.32), (1.2, 0.60, 0.13), (1.53, 0.40, 0.10),
+             (2.02, 0.40, 0.12), (2.5, 0.20, 0.045), (3.0, 0.15, 0.035),
+             (4.0, 0.10, 0.025), (5.3, 0.07, 0.018), (6.6, 0.05, 0.012))
+    rng = np.random.default_rng(131)
+    for ratio, amp, tau in modes:
+        f = f0 * ratio * (1 + (rng.uniform(-0.007, 0.007) if ratio > 2 else 0.0))
+        x += amp * np.sin(2 * np.pi * f * t) * np.exp(-t / tau)
+    x += _shaped_noise(132, t, rate, lo=6000.0, tau=0.002, dur=0.003) * 0.1
+    return _norm(_endfade(_attack(x, rate, 0.0005), rate, 0.005), 0.7)
+
+
+def synth_cowbell(rate: int = RATE) -> "np.ndarray":
+    """The 808 pair (540 + 800 Hz — the inharmonic 1.48 ratio IS the cowbell) through a
+    2.64 kHz formant, with a clanked attack.  A harmonic pair would sound like an organ."""
+    t = _t(0.32, rate)
+    x = 0.85 * _bl_square(t, 540.0, rate) + 1.0 * _bl_square(t, 800.0, rate)
+    clank = np.tanh(4.0 * x) * np.exp(-t / 0.004)             # hard-clipped first ms
+    x = x + 0.25 * clank
+    x += _shaped_noise(133, t, rate, hi=4000.0, tau=0.004, dur=0.010) * 0.06
+    x *= 0.6 * np.exp(-t / 0.004) + 0.4 * np.exp(-t / 0.065)  # impact, then ring
+    x = _fft_shape(x, rate, lo=430.0, hi=8000.0, peak_hz=2640.0, peak_gain=2.5,
+                   peak_q=2.0)
+    x = np.tanh(1.3 * x / max(1e-9, np.max(np.abs(x))))
+    return _norm(_attack(x, rate, 0.0007), 0.65)
+
+
+def synth_tambourine(rate: int = RATE) -> "np.ndarray":
+    """Many discrete, detuned, time-jittered jingle pings — ONE filtered burst is a
+    cabasa, not a tambourine."""
+    t = _t(0.35, rate)
+    rng = np.random.default_rng(134)
+    x = np.zeros(len(t), dtype=np.float64)
+    for _ in range(24):                                 # jingle cloud
+        centre = rng.uniform(4800.0, 11500.0)
+        start = rng.uniform(0.0, 0.035)
+        tau = rng.uniform(0.020, 0.060)
+        amp = rng.uniform(0.5, 1.0)
+        k = int(start * rate)
+        seg = t[: len(t) - k]
+        burst = rng.uniform(-1.0, 1.0, len(seg)) * np.exp(-seg / tau)
+        x[k:] += amp * _fft_shape(burst, rate, lo=centre * 0.9, hi=centre * 1.1)
+    for _ in range(18):                                 # faint metallic pings
+        f = rng.uniform(5000.0, 12000.0)
+        k = int(rng.uniform(0.0, 0.03) * rate)
+        seg = t[: len(t) - k]
+        x[k:] += 0.1 * np.sin(2 * np.pi * f * seg) * np.exp(-seg / rng.uniform(0.02, 0.05))
+    thump = _shaped_noise(135, t, rate, lo=200.0, hi=400.0, tau=0.010) * 0.05
+    x = _fft_shape(x + thump, rate, lo=2000.0)
+    return _norm(_endfade(x, rate, 0.01), 0.7)
+
+
+def synth_shaker(rate: int = RATE) -> "np.ndarray":
+    """The soft few-ms attack IS the hand motion — an instant attack reads as a click.
+    The band centre falls across the stroke like beads settling."""
+    t = _t(0.16, rate)
+    rng = np.random.default_rng(136)
+    noise = rng.uniform(-1.0, 1.0, len(t))
+    hi = _fft_shape(noise, rate, lo=5500.0, hi=9500.0)
+    mid = _fft_shape(noise, rate, lo=4000.0, hi=7000.0)
+    body = _fft_shape(noise, rate, lo=1800.0, hi=3000.0) * 0.3
+    blend = np.clip(t / 0.12, 0.0, 1.0)                # spectral centre falls over time
+    x = hi * (1 - blend) + mid * blend + body
+    rise = np.clip(t / 0.012, 0.0, 1.0) ** 2           # convex 12 ms rise
+    env = rise * np.exp(-np.maximum(t - 0.012, 0.0) / 0.070)
+    k = int(0.020 * rate)                              # the smaller settle grain
+    env[k:] += 0.4 * np.clip((t[: len(t) - k]) / 0.008, 0, 1) ** 2 * \
+        np.exp(-np.maximum(t[: len(t) - k] - 0.008, 0.0) / 0.045)
+    x = _fft_shape(x * env, rate, lo=2000.0)
+    return _norm(x, 0.55)
 
 
 def synth_perc(rate: int = RATE) -> "np.ndarray":
-    t = _t(0.09, rate)  # short woodblock-style blip
-    return _norm(np.sin(2 * np.pi * 620.0 * t) * np.exp(-t * 40.0), 0.8)
+    """A woodblock: dominant fundamental, one inharmonic colour mode, mallet tick —
+    minimal on purpose so tuning by ear stays locked to f0."""
+    t = _t(0.11, rate)
+    x = np.sin(2 * np.pi * 620.0 * t) * np.exp(-t / 0.075)
+    x += 0.3 * np.sin(2 * np.pi * 620.0 * 2.7 * t) * np.exp(-t / 0.038)
+    x += _shaped_noise(137, t, rate, lo=2000.0, hi=3000.0, tau=0.0015, dur=0.002) * 0.15
+    return _norm(_attack(x, rate, 0.0005), 0.8)
+
+
+def synth_fx(rate: int = RATE) -> "np.ndarray":
+    """A riser: noise through an exponentially climbing resonant band, swelling with an
+    accelerating tremolo into the drop.  Linear sweeps sound static — everything here
+    accelerates."""
+    secs = 1.8
+    t = _t(secs, rate)
+    rng = np.random.default_rng(138)
+    noise = rng.uniform(-1.0, 1.0, len(t))
+    centres = 200.0 * (8000.0 / 200.0) ** np.linspace(0.0, 1.0, 6)   # exponential climb
+    x = np.zeros(len(t), dtype=np.float64)
+    seg = len(t) // 5
+    for i, c in enumerate(centres[:-1]):
+        a, b = i * seg, min(len(t), (i + 2) * seg)     # overlapping crossfaded segments
+        band = _fft_shape(noise[a:b], rate, lo=c * 0.7, hi=centres[i + 1] * 1.3,
+                          peak_hz=(c + centres[i + 1]) / 2, peak_gain=3.0, peak_q=4.0)
+        win = np.hanning(b - a)
+        x[a:b] += band * win
+    swell = (t / secs) ** 2.5                          # accelerating rise...
+    trem_rate = 4.0 + 14.0 * (t / secs) ** 2
+    trem = 1.0 - 0.3 * (t / secs) * (0.5 + 0.5 * np.sin(2 * np.pi * np.cumsum(trem_rate) / rate))
+    x *= swell * trem
+    x = np.tanh(1.4 * x / max(1e-9, np.max(np.abs(x))))
+    return _norm(_endfade(x, rate, 0.015), 0.75)
 
 
 # -- kits ------------------------------------------------------------------------
@@ -484,26 +810,34 @@ class DrumKit:
         return known + sorted(k for k in self.voices if k not in ROLES)
 
 
+_synth_voice_cache: dict = {}
+
+
 def synth_kit(rate: int = RATE) -> DrumKit:
     """The built-in synth kit — a voice for every part of the full standard kit, so the
     whole palette (five toms, second crash, splash, china, ride bell, cowbell, tambourine,
     shaker, pedal hat, rimshot) is always playable and the fill engine never asks for a
     part that isn't there."""
-    voices = {
-        "kick": synth_kick(rate), "snare": synth_snare(rate),
-        "rimshot": synth_rimshot(rate), "clap": synth_clap(rate),
-        "hihat": synth_hihat(rate), "pedalhat": synth_pedalhat(rate),
-        "openhat": synth_openhat(rate),
-        "crash": synth_crash(rate), "crash2": synth_crash2(rate),
-        "splash": synth_splash(rate), "china": synth_china(rate),
-        "ride": synth_ride(rate), "ridebell": synth_ridebell(rate),
-        "cowbell": synth_cowbell(rate), "tambourine": synth_tambourine(rate),
-        "shaker": synth_shaker(rate),
-        "808": synth_808(rate), "perc": synth_perc(rate),
-    }
-    for role, (base, decay, secs) in _TOM_VOICES.items():
-        voices[role] = synth_tom(rate, base, decay, secs)
-    return DrumKit("Synth (built-in)", voices)
+    if rate not in _synth_voice_cache:
+        voices = {
+            "kick": synth_kick(rate), "snare": synth_snare(rate),
+            "rimshot": synth_rimshot(rate), "clap": synth_clap(rate),
+            "hihat": synth_hihat(rate), "pedalhat": synth_pedalhat(rate),
+            "openhat": synth_openhat(rate),
+            "crash": synth_crash(rate), "crash2": synth_crash2(rate),
+            "splash": synth_splash(rate), "china": synth_china(rate),
+            "ride": synth_ride(rate), "ridebell": synth_ridebell(rate),
+            "cowbell": synth_cowbell(rate), "tambourine": synth_tambourine(rate),
+            "shaker": synth_shaker(rate),
+            "808": synth_808(rate), "perc": synth_perc(rate), "fx": synth_fx(rate),
+        }
+        for role, (f0, tau_f, secs, amps, chz, camp, drop, dtau) in _TOM_VOICES.items():
+            voices[role] = _membrane(rate, f0, tau_f, secs, amps, chz, camp, drop, dtau)
+        _synth_voice_cache[rate] = voices
+    # A fresh DrumKit each call (cheap), sharing the cached one-shot buffers: the voices
+    # are treated read-only by every consumer, and building the cymbal banks from scratch
+    # per call would cost seconds.
+    return DrumKit("Synth (built-in)", dict(_synth_voice_cache[rate]))
 
 
 #: Name tokens that mark a sample as a vocal chop / chant rather than a drum hit.

@@ -29,12 +29,44 @@ PITCH_CONFIDENCE_MIN = 0.45
 #: Highest plausible fundamental per role, so a kick can't lock onto a high harmonic.
 #: 808s live in the sub-bass; kicks range from sub-bass to a mid "knock"; toms higher;
 #: tuned percussion may ring up top.  (Snares/hats stay noise and fall out on confidence.)
-_ROLE_FMAX = {"kick": 150.0, "808": 200.0, "tom": 400.0, "snare": 520.0}
+_ROLE_FMAX = {"kick": 150.0, "808": 200.0, "tom": 400.0, "snare": 520.0,
+              "ridebell": 1500.0, "cowbell": 1500.0}
+
+#: Lowest plausible fundamental per role.  Bells matter here: an inharmonic bell's
+#: autocorrelation peaks at a SUBHARMONIC lattice (a 520 Hz ride bell reads as 130 Hz)
+#: unless the search is denied that range.
+_ROLE_FMIN = {"ridebell": 320.0, "cowbell": 320.0, "snare": 120.0}
+
+#: Roles that must never report a KEY, whatever the autocorrelation finds.  The synth's
+#: 808-lineage hats are genuinely quasi-tonal — the estimator isn't wrong — but "hats and
+#: cymbals report no key" is the spoken-UX contract: tuning a hat to a note makes no
+#: musical sense, so their confidence is capped under the pitched threshold.
+_NOISE_ROLES = ("hihat", "pedalhat", "openhat", "crash", "crash2", "splash", "china",
+                "ride", "tambourine", "shaker", "clap", "fx")
+
+_ALL_ROLE_KEYS = tuple(set(_ROLE_FMAX) | set(_ROLE_FMIN) | set(_NOISE_ROLES))
+
+
+def _role_key(role: str | None) -> str:
+    """The known role a (possibly line-id) role name maps to, by LONGEST prefix — so
+    "tom4"/"tom4 2" hit "tom", and "ridebell" beats "ride"."""
+    if not role:
+        return ""
+    best = ""
+    for key in _ALL_ROLE_KEYS:
+        if role.startswith(key) and len(key) > len(best):
+            best = key
+    return best
 
 
 def role_fmax(role: str | None) -> float:
     """The highest fundamental worth searching for a given drum role."""
-    return _ROLE_FMAX.get(role or "", 1200.0)
+    return _ROLE_FMAX.get(_role_key(role), 1200.0)
+
+
+def role_fmin(role: str | None) -> float:
+    """The lowest fundamental worth searching for a given drum role."""
+    return _ROLE_FMIN.get(_role_key(role), 25.0)
 
 
 @dataclass(frozen=True)
@@ -87,6 +119,7 @@ def estimate_pitch(samples, rate: int, fmin: float = 25.0,
         return None
     if fmax is None:
         fmax = role_fmax(role)
+    fmin = max(fmin, role_fmin(role))
     x = np.asarray(samples, dtype=np.float64)
     if x.ndim > 1:                       # downmix stereo/multi-channel to mono
         x = x.mean(axis=1)
@@ -114,6 +147,9 @@ def estimate_pitch(samples, rate: int, fmin: float = 25.0,
         win = x[onset:onset + int(0.35 * rate)]
         if len(win) >= rate // 100:
             best = _autocorr_pitch(win, rate, fmin, fmax)
+    if best is not None and _role_key(role) in _NOISE_ROLES:
+        best = Pitch(best.freq_hz, best.note, best.cents,
+                     min(best.confidence, PITCH_CONFIDENCE_MIN * 0.98))
     return best
 
 
