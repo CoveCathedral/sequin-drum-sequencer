@@ -291,11 +291,35 @@ def _t(seconds: float, rate: int) -> "np.ndarray":
     return np.linspace(0, seconds, int(rate * seconds), endpoint=False, dtype=np.float64)
 
 
-# -- synthesis primitives ----------------------------------------------------------
+# ==================================================================================
+# Spangle — Sequin's drum synthesizer
+# ==================================================================================
 #
-# Offline rendering is the whole design advantage here: voices are built once and
-# cached, so a cymbal can afford ~500 partials and every filter can be a clean
-# FFT-domain shape instead of a real-time compromise.
+# (A spangle is another word for a sequin — and cymbals are shiny metal discs, which is
+# what this engine renders best.)  Spangle is the built-in synth kit: every part of the
+# standard kit synthesized from physics-shaped recipes — modal membrane banks for the
+# drums, the measured TR-808 metal comb for the hats, dense inharmonic partial banks
+# with per-partial decay laws for the cymbals, bell-mode tables for the bells.
+#
+# Design principles (hold these when extending it):
+# - OFFLINE, ONCE: voices render once and cache, so a cymbal can afford hundreds of
+#   partials and every filter is a clean FFT-domain shape — economies real-time synths
+#   can't make. Spend compute freely; spend code complexity carefully.
+# - DETERMINISTIC: every voice is seeded. The same build sounds the same forever.
+# - PITCH CONTRACTS: pitched voices (kick, toms, 808, bells, perc) keep a clean,
+#   detectable fundamental — a blind user tunes them by ear; the five toms stay ordered
+#   high->low. Hats/cymbals never report a key (see pitch._NOISE_ROLES).
+# - NO BAKED DYNAMICS: accent/ghost gain and +-12 st resampling happen downstream;
+#   voices ship one neutral one-shot. (Planned: per-dynamic variants and round-robin —
+#   see docs/spangle.md.)
+#
+# Licensing: Spangle is part of Sequin — AGPL-3.0-or-later, copyright Kaylea Fox. All
+# code is original; the synthesis techniques come from public DSP literature (Sound on
+# Sound "Synth Secrets", TR-808 circuit analyses, membrane/bell modal tables), cited as
+# lineage in docs/spangle.md, not copied as code. Sounds rendered with it belong to the
+# musician who renders them.
+
+# -- synthesis primitives ----------------------------------------------------------
 
 def _attack(x: "np.ndarray", rate: int, secs: float) -> "np.ndarray":
     """Raised-cosine fade-in — kills the DC pop of a hard start."""
@@ -459,9 +483,9 @@ def synth_808(rate: int = RATE) -> "np.ndarray":
     return _norm(_attack(x, rate, 0.006))
 
 
-def synth_snare(rate: int = RATE, f0: float = 195.0, body_mix: float = 0.55,
-                crack_mix: float = 0.95, buzz_tau: float = 0.130,
-                bright: float = 1.0) -> "np.ndarray":
+def synth_snare(rate: int = RATE, f0: float = 172.0, body_mix: float = 0.7,
+                crack_mix: float = 0.95, buzz_tau: float = 0.165,
+                bright: float = 0.85) -> "np.ndarray":
     """A snare that is a DRUM, not a drum machine.
 
     The 80s-toy sound is architectural: pure sine modes + a separate smooth noise layer.
@@ -849,10 +873,12 @@ _synth_voice_cache: dict = {}
 
 
 def synth_kit(rate: int = RATE) -> DrumKit:
-    """The built-in synth kit — a voice for every part of the full standard kit, so the
-    whole palette (five toms, second crash, splash, china, ride bell, cowbell, tambourine,
-    shaker, pedal hat, rimshot) is always playable and the fill engine never asks for a
-    part that isn't there."""
+    """The built-in **Spangle** kit — a synthesized voice for every part of the full
+    standard kit (five toms, two crashes, splash, china, ride + bell, cowbell,
+    tambourine, shaker, pedal hat, rimshot, 808, perc, fx), so the whole palette is
+    always playable and the fill engine never asks for a part that isn't there.  Shown
+    in the Kit list as "Synth (built-in)" — that label is persisted in saved songs and
+    kit choices, so it stays stable even though the engine has a name now."""
     if rate not in _synth_voice_cache:
         voices = {
             "kick": synth_kick(rate), "snare": synth_snare(rate),
