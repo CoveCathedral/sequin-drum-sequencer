@@ -38,8 +38,14 @@ def _write_float32_wav(path, samples, rate=44100):
 
 
 def _frames(wav_bytes):
+    """PCM frames of a render as one channel (left), so sample INDICES mean frame times.
+
+    Loops render stereo now; centre-panned parts (kick, snare) are identical in both
+    channels, so onset-position and level assertions read the left channel.
+    """
     w = wave.open(io.BytesIO(wav_bytes))
-    return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    return pcm.reshape(-1, w.getnchannels())[:, 0]
 
 
 def test_synth_kit_has_expected_roles():
@@ -674,7 +680,10 @@ def test_render_volume_scales_output():
     p = drums.GENRE_PATTERNS[0]
 
     def peak(vol):
-        pcm = _frames(drums.render_loop(p, kit, 120, volume=vol))
+        # humanize pinned off: it re-rolls per render, and this test compares TWO renders,
+        # so leaving it on compares different performances. (The old hard peak-normalize
+        # used to pin both peaks to the ceiling, which masked exactly this.)
+        pcm = _frames(drums.render_loop(p, kit, 120, volume=vol, humanize=0.0))
         return int(np.abs(pcm).max())
     full, half, silent = peak(1.0), peak(0.5), peak(0.0)
     assert silent == 0
@@ -1185,3 +1194,46 @@ def test_soft_limit_tames_peaks_without_ducking_the_body():
     assert np.allclose(out[:400], 0.5, atol=1e-6)       # the body is untouched...
     assert 0.8 < out[500] <= 1.0                        # ...the peak is squashed into range
     assert np.array_equal(drums._soft_limit(quiet), quiet)   # under unity: no-op
+
+
+def _stereo(wav_bytes):
+    w = wave.open(io.BytesIO(wav_bytes))
+    assert w.getnchannels() == 2
+    return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").reshape(-1, 2).astype(float)
+
+
+def test_loops_render_in_stereo_with_a_kit_image():
+    kit = drums.synth_kit()
+    # The mix is stereo, and the image matches a real kit's seats: hats LEFT of centre,
+    # ride RIGHT, kick dead centre (identical channels). Constant-power, so neither
+    # channel is starved.
+    hat = _stereo(drums.render_loop(drums.Pattern("h", 4, 4, {"hihat": [0]}), kit, 120))
+    assert np.abs(hat[:, 0]).max() > 1.2 * np.abs(hat[:, 1]).max()
+    ride = _stereo(drums.render_loop(drums.Pattern("r", 4, 4, {"ride": [0]}), kit, 120))
+    assert np.abs(ride[:, 1]).max() > 1.2 * np.abs(ride[:, 0]).max()
+    kick = _stereo(drums.render_loop(drums.Pattern("k", 4, 4, {"kick": [0]}), kit, 120))
+    # Centred means acoustically identical channels; the per-channel dither adds +-2 LSB
+    # of (deliberate, decorrelated) noise, so compare within that bound, not byte-equal.
+    assert np.abs(kick[:, 0] - kick[:, 1]).max() <= 2
+
+
+def test_stacked_lines_inherit_their_roles_seat():
+    # Editor patterns key hits by LINE id ("hihat 2"); the prefix must map to the role's
+    # pan so a stacked hat still sits where hats sit.
+    assert drums._pan_for("hihat 2") == drums.ROLE_PAN["hihat"]
+    assert drums._pan_for("tom5 3") == drums.ROLE_PAN["tom5"]
+    assert drums._pan_for("something-unknown") == 0.0
+
+
+def test_songs_render_in_stereo_end_to_end():
+    kit = drums.synth_kit()
+    p = drums.GENRE_PATTERNS[0]
+    wav = drums.render_song([(p, 1, 120, kit), (p, 0.5, 140, kit)])
+    frames = _stereo(wav)
+    assert len(frames) > 44100                       # both sections made it in
+    # An explicit per-line pan override beats the role default (the future UI hook).
+    hard_r = _stereo(drums.render_loop(drums.Pattern("k", 4, 4, {"kick": [0]}), kit, 120))
+    buf = drums._mix_pattern(drums.Pattern("k", 4, 4, {"kick": [0]}), kit, 120.0,
+                             44100, 0.0, 0.0, None, None, pans={"kick": -1.0})
+    assert np.abs(buf[:, 0]).max() > 0 and np.abs(buf[:, 1]).max() < 1e-4
+    assert np.abs(hard_r[:, 0] - hard_r[:, 1]).max() <= 2   # default kick stays centred

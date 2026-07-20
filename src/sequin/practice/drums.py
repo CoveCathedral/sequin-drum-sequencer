@@ -658,6 +658,42 @@ LEVEL_ACCENT = "accent"
 LEVEL_GHOST = "ghost"
 _LEVEL_GAIN = {None: 1.0, LEVEL_ACCENT: 1.45, LEVEL_GHOST: 0.4}
 
+# -- stereo image -------------------------------------------------------------------
+#
+# Subtle, drummer's-perspective defaults: hats to the left, ride to the right, the five
+# toms swept high-left to low-right, kick/snare/808 dead centre.  Values are pan positions
+# in [-1, 1]; mixing uses constant-power gains so nothing changes loudness as it moves.
+# Kept gentle (|pan| <= 0.4): the point is a kit that occupies space, not ping-pong.
+ROLE_PAN: dict[str, float] = {
+    "kick": 0.0, "snare": 0.0, "808": 0.0, "rimshot": 0.0, "clap": 0.0,
+    "hihat": -0.25, "pedalhat": -0.25, "openhat": -0.25,
+    "ride": 0.30, "ridebell": 0.30,
+    "crash": -0.20, "crash2": 0.25, "splash": -0.35, "china": 0.40,
+    "tom1": -0.30, "tom2": -0.15, "tom": 0.0, "tom4": 0.18, "tom5": 0.32,
+    "cowbell": 0.15, "tambourine": -0.20, "shaker": 0.35, "perc": -0.28, "fx": 0.20,
+}
+
+
+def _pan_for(key: str) -> float:
+    """The default pan of a hits key: exact role, else its longest role prefix.
+
+    Editor patterns key hits by LINE id ("kick 2", "tom1 3"), which starts with the role
+    name, so prefix matching gives stacked lines the same seat their drum occupies.
+    """
+    if key in ROLE_PAN:
+        return ROLE_PAN[key]
+    best = ""
+    for role in ROLE_PAN:
+        if key.startswith(role) and len(role) > len(best):
+            best = role
+    return ROLE_PAN.get(best, 0.0)
+
+
+def _pan_gains(pan: float) -> tuple[float, float]:
+    """Constant-power left/right gains for a pan position in [-1, 1]."""
+    theta = (max(-1.0, min(1.0, pan)) + 1.0) * (math.pi / 4.0)
+    return math.cos(theta), math.sin(theta)
+
 
 @dataclass
 class Pattern:
@@ -1935,14 +1971,20 @@ def _choke_cutoffs(pattern: Pattern, choke_groups: dict, step_s: float, rate: in
 
 def _mix_pattern(pattern: Pattern, kit: DrumKit, bpm: float, rate: int,
                  swing: float, humanize: float, seed: int | None,
-                 choke_groups: dict | None):
-    """Mix one loop of *pattern* into a float32 buffer (no normalize/volume yet)."""
+                 choke_groups: dict | None, pans: dict | None = None):
+    """Mix one loop of *pattern* into a float32 (frames, 2) stereo buffer.
+
+    No normalize/volume yet — that happens in _buf_to_wav.  Each hits key gets a seat in
+    the stereo image: an explicit entry in *pans* (a per-line override, [-1, 1]) or the
+    role's default from ROLE_PAN, mixed with constant-power gains.
+    """
     pattern = flatten_polymeter(pattern)  # per-line lengths -> one tiled loop
     step_s = pattern.step_seconds(bpm)
     beat_dur = 60.0 / max(1.0, bpm)      # a quarter note, the swing reference
     spb = max(1, pattern.steps_per_beat)
     length = max(1, int(round(pattern.steps * step_s * rate)))
-    buf = np.zeros(length, dtype=np.float32)
+    buf = np.zeros((length, 2), dtype=np.float32)
+    pan_of = pans or {}
     rng = random.Random(seed) if humanize > 0 else None
     # Per-step probability ("sometimes" hits): its own RNG stream, so seeded humanize
     # renders stay reproducible and chance-free patterns stay byte-identical.
@@ -1959,6 +2001,7 @@ def _mix_pattern(pattern: Pattern, kit: DrumKit, bpm: float, rate: int,
             t += rng.uniform(-1.0, 1.0) * humanize * _HUMANIZE_MAX_JITTER_S
         return int(round(max(0.0, t) * rate))
 
+    left, right = buf[:, 0], buf[:, 1]
     for role, steps_on in pattern.hits.items():
         voice = kit.voice(role)
         if voice is None or len(voice) == 0:
@@ -1967,6 +2010,12 @@ def _mix_pattern(pattern: Pattern, kit: DrumKit, bpm: float, rate: int,
         role_probs = pattern.probs.get(role, {})
         role_orns = pattern.ornaments.get(role, {})
         group = group_of.get(role)
+        gl, gr = _pan_gains(pan_of.get(role, _pan_for(role)))
+
+        def mix(vv, off):                # one hit into both channels, panned
+            _mix_wrap(left, vv * gl, off)
+            _mix_wrap(right, vv * gr, off)
+
         scaled = {None: voice}
         for step in steps_on:
             if not 0 <= step < pattern.steps:
@@ -1989,15 +2038,15 @@ def _mix_pattern(pattern: Pattern, kit: DrumKit, bpm: float, rate: int,
             off = hit_offset(step)
             orn = role_orns.get(step)
             if orn == ORNAMENT_FLAM:     # grace offsets are negative; _mix_wrap wraps
-                _mix_wrap(buf, v * _GRACE_GAIN, off - int(_FLAM_S * rate))
+                mix(v * _GRACE_GAIN, off - int(_FLAM_S * rate))
             elif orn == ORNAMENT_DRAG:
-                _mix_wrap(buf, v * _GRACE_GAIN, off - int(2 * _DRAG_S * rate))
-                _mix_wrap(buf, v * _GRACE_GAIN, off - int(_DRAG_S * rate))
+                mix(v * _GRACE_GAIN, off - int(2 * _DRAG_S * rate))
+                mix(v * _GRACE_GAIN, off - int(_DRAG_S * rate))
             elif orn == ORNAMENT_ROLL:   # rebounds subdivide the step: tempo-aware
                 sub = max(1, int(round(step_s * rate / 4)))
                 for k, g in enumerate(_ROLL_GAINS, start=1):
-                    _mix_wrap(buf, v * g, off + k * sub)
-            _mix_wrap(buf, v, off)
+                    mix(v * g, off + k * sub)
+            mix(v, off)
     return buf
 
 
@@ -2056,7 +2105,10 @@ def render_loop(pattern: Pattern, kit: DrumKit, bpm: float, rate: int = RATE,
                 humanize: float | None = None,
                 seed: int | None = None, choke_groups: dict | None = None,
                 passes: int | None = None) -> bytes:
-    """Pre-mix one loop of *pattern* played on *kit* at *bpm* into a 16-bit mono WAV.
+    """Pre-mix one loop of *pattern* played on *kit* at *bpm* into a 16-bit stereo WAV.
+
+    Each part sits in a gentle stereo image (hats left, ride right, toms swept across;
+    see ROLE_PAN) with constant-power panning.
 
     *volume* (0..1) scales the finished mix.  *swing* and *humanize* default to the
     pattern's own saved feel (``pattern.swing`` / ``pattern.humanize``) — a groove
@@ -2100,7 +2152,7 @@ def render_song(sections, rate: int = RATE, volume: float = 1.0,
 
     Each section is mixed **at its own tempo, kit, and feel** (each groove's saved
     ``swing``/``humanize``), tiled *repeats* times; the sections are concatenated into one
-    continuous 16-bit mono WAV (gapless, no timers), then peak-limited and volume-scaled
+    continuous 16-bit stereo WAV (gapless, no timers), then soft-limited and volume-scaled
     together so levels stay even across sections.  Sections may differ in meter, tempo, kit,
     feel and length; hats auto-choke per section.  Pass *swing*/*humanize* to force one feel
     across the whole song instead of per-section.  A song plays through once.
@@ -2154,7 +2206,7 @@ def render_song_buffer(sections, rate: int = RATE, swing: float | None = None,
         if frac:
             tail = mix()
             parts.append(tail[: max(1, int(round(len(tail) * frac)))])
-    return np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
+    return np.concatenate(parts) if parts else np.zeros((1, 2), dtype=np.float32)
 
 
 def section_seconds(pattern: Pattern, repeats, bpm: float,
