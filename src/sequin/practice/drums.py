@@ -227,12 +227,48 @@ def load_wav_float(path) -> tuple["np.ndarray", int]:
     return x.astype(np.float32), rate
 
 
+_SINC_HALF = 16       # taps per side at unit rate (widened when reading faster = downsampling)
+_KAISER_BETA = 8.6    # ~80 dB stopband — clean enough that the window is never the artifact
+
+
+def _sinc_read(x: "np.ndarray", step: float, n_out: int) -> "np.ndarray":
+    """Read *x* at fractional positions ``n * step`` with a Kaiser-windowed sinc.
+
+    This is the one resampling core: rate conversion reads at src/dst, pitch shifting
+    reads at 2^(semitones/12).  Linear interpolation (the old core) rolls off highs and
+    aliases on pitched-DOWN 808s and toms — exactly the material the tuning feature is
+    for — so the upgrade is audible where it matters.  When reading faster than unity the
+    kernel widens and its cutoff drops to the new Nyquist (anti-aliasing decimation).
+    Ends are treated as silence, which is correct for one-shot hits.  Deterministic.
+    """
+    if len(x) < 4 or n_out <= 0:          # degenerate input: linear is exact enough
+        t = np.arange(max(1, n_out)) * step
+        return np.interp(t, np.arange(len(x)), x).astype(np.float32)
+    cutoff = min(1.0, 1.0 / step)
+    half = min(256, int(np.ceil(_SINC_HALF / cutoff)))
+    taps = np.arange(-half + 1, half + 1, dtype=np.float64)
+    xp = np.concatenate([np.zeros(half, np.float32), x.astype(np.float32),
+                         np.zeros(half + 1, np.float32)])
+    out = np.empty(n_out, dtype=np.float32)
+    # Chunk the (n_out x taps) work so an 8-second cymbal doesn't balloon memory.
+    for a in range(0, n_out, 32768):
+        b = min(n_out, a + 32768)
+        pos = np.arange(a, b, dtype=np.float64) * step
+        i0 = np.floor(pos).astype(np.int64)
+        t = taps[None, :] - (pos - i0)[:, None]
+        win = np.i0(_KAISER_BETA * np.sqrt(np.clip(1.0 - (t / half) ** 2, 0.0, 1.0)))
+        w = np.sinc(cutoff * t) * win
+        w /= w.sum(axis=1, keepdims=True)     # unity gain at every read position
+        out[a:b] = (xp[i0[:, None] + (taps.astype(np.int64) + half)[None, :]]
+                    * w).sum(axis=1).astype(np.float32)
+    return out
+
+
 def resample(x: "np.ndarray", src_rate: int, dst_rate: int) -> "np.ndarray":
     if src_rate == dst_rate or len(x) == 0:
         return x.astype(np.float32)
     n_out = max(1, int(round(len(x) * dst_rate / src_rate)))
-    t = np.linspace(0, len(x), n_out, endpoint=False)
-    return np.interp(t, np.arange(len(x)), x).astype(np.float32)
+    return _sinc_read(x, src_rate / dst_rate, n_out)
 
 
 def load_sample(path, rate: int = RATE) -> "np.ndarray":
@@ -1805,17 +1841,14 @@ def resample_pitch(voice, semitones: float):
 
     Higher pitch plays back faster, so the sample also gets slightly shorter — which
     is natural for drums (a lower tom rings a touch longer, a higher one tightens up).
-    Linear interpolation is ample for one-shot hits.  Zero semitones is a no-op.
+    Uses the windowed-sinc core so pitched-down 808s/toms keep their highs instead of
+    gaining linear-interp haze.  Zero semitones is a no-op.
     """
     if np is None or voice is None or not semitones or len(voice) == 0:
         return voice
     ratio = 2.0 ** (semitones / 12.0)
     new_len = max(1, int(round(len(voice) / ratio)))
-    idx = np.arange(new_len) * ratio
-    i0 = np.floor(idx).astype(np.int64)
-    frac = (idx - i0).astype(np.float32)
-    i1 = np.minimum(i0 + 1, len(voice) - 1)
-    return ((1.0 - frac) * voice[i0] + frac * voice[i1]).astype(np.float32)
+    return _sinc_read(voice, ratio, new_len)
 
 
 def scale_voice(voice, gain: float):
@@ -1968,19 +2001,52 @@ def _mix_pattern(pattern: Pattern, kit: DrumKit, bpm: float, rate: int,
     return buf
 
 
-def _buf_to_wav(buf, volume: float, rate: int) -> bytes:
-    """Peak-limit, apply *volume*, and wrap a float32 buffer as a 16-bit mono WAV."""
+_SOFT_KNEE = 0.8      # level above which peaks are squashed instead of the whole mix ducked
+
+
+def _soft_limit(buf: "np.ndarray") -> "np.ndarray":
+    """Tame over-unity peaks without pulling the whole mix down.
+
+    Straight peak-normalize meant ONE hot transient (a crash landing on a kick) dropped
+    the loudness of the entire loop.  Instead, the body of the signal (|x| <= knee) passes
+    untouched and only the excursion above the knee is squashed through tanh, which maps
+    any peak into [-1, 1].  Memoryless, deterministic, transparent below the knee.
+    """
     peak = float(np.max(np.abs(buf))) if len(buf) else 0.0
-    if peak > 1.0:                       # prevent clipping without pumping quiet loops up
-        buf = buf / peak
+    if peak <= 1.0:
+        return buf
+    a = np.abs(buf)
+    over = a > _SOFT_KNEE
+    out = buf.astype(np.float32).copy()
+    span = 1.0 - _SOFT_KNEE
+    out[over] = np.sign(buf[over]) * (
+        _SOFT_KNEE + span * np.tanh((a[over] - _SOFT_KNEE) / span))
+    return out
+
+
+def _buf_to_wav(buf, volume: float, rate: int) -> bytes:
+    """Soft-limit, apply *volume*, dither, and wrap a float32 buffer as a 16-bit WAV.
+
+    Accepts mono (1D) or stereo (frames, 2).  The TPDF dither is seeded, so the same
+    buffer always produces the same bytes — several tests (and WAV-export reproducibility)
+    rely on renders of identical content being identical.
+    """
+    buf = np.asarray(buf, dtype=np.float32)
+    buf = _soft_limit(buf)
     buf = buf * max(0.0, min(1.0, volume))
-    pcm = (np.clip(buf, -1.0, 1.0) * 32767.0).astype("<i2")
+    scaled = np.clip(buf, -1.0, 1.0) * 32767.0
+    if len(scaled) and float(np.max(np.abs(scaled))) > 0.0:
+        rng = np.random.default_rng(24601)                    # fixed seed: determinism
+        scaled = scaled + (rng.random(scaled.shape, dtype=np.float32)
+                           - rng.random(scaled.shape, dtype=np.float32))  # TPDF, +-1 LSB
+    # Never dither pure digital silence — volume 0 must stay absolutely silent.
+    pcm = np.clip(np.rint(scaled), -32768, 32767).astype("<i2")
     out = io.BytesIO()
     w = wave.open(out, "wb")
-    w.setnchannels(1)
+    w.setnchannels(1 if pcm.ndim == 1 else pcm.shape[1])
     w.setsampwidth(2)
     w.setframerate(rate)
-    w.writeframes(pcm.tobytes())
+    w.writeframes(np.ascontiguousarray(pcm).tobytes())   # C order interleaves L R L R
     w.close()
     return out.getvalue()
 

@@ -1137,3 +1137,51 @@ def test_fill_ornaments_use_only_the_styles_vocabulary():
         for role, m in p.ornaments.items():
             for orn in m.values():
                 assert orn in allowed, f"{p.name}: {role} got {orn}, not in {allowed}"
+
+
+# -- audio engine v2: resampling & output quality ----------------------------------
+
+def test_sinc_resample_rejects_aliases_linear_would_pass():
+    # An 18 kHz tone pitched up an octave would land at 36 kHz — impossible at a 44.1 kHz
+    # rate — so unfiltered reading folds it to an audible 8.1 kHz alias. The old linear
+    # core passed that alias at FULL amplitude (measured: ratio 1.0, peak at 8100 Hz); the
+    # sinc core's anti-alias cutoff must kill it. This is the audible difference on
+    # pitched-up hats and percussion.
+    t = np.arange(22050) / 44100.0
+    tone = np.sin(2 * np.pi * 18000 * t).astype(np.float32)
+    up = drums.resample_pitch(tone, 12.0)              # read at 2x
+    assert np.sqrt(np.mean(up ** 2)) < 0.02 * np.sqrt(np.mean(tone ** 2))
+    # And content that legitimately fits (10 kHz -> 20 kHz < Nyquist) still passes.
+    ok = drums.resample_pitch(np.sin(2 * np.pi * 10000 * t).astype(np.float32), 12.0)
+    assert np.sqrt(np.mean(ok ** 2)) > 0.6
+
+
+def test_sinc_resample_preserves_inband_content():
+    # A 1 kHz tone pitched down an octave should come back as a clean 500 Hz tone.
+    t = np.arange(22050) / 44100.0
+    tone = np.sin(2 * np.pi * 1000 * t).astype(np.float32)
+    down = drums.resample_pitch(tone, -12.0)
+    ref = np.sin(2 * np.pi * 500 * np.arange(len(down)) / 44100.0).astype(np.float32)
+    err = np.sqrt(np.mean((down[200:-200] - ref[200:-200]) ** 2))
+    assert err < 0.01                                   # essentially transparent in-band
+
+
+def test_wav_output_is_deterministic_and_silence_stays_silent():
+    kit = drums.synth_kit()
+    p = drums.GENRE_PATTERNS[0]
+    # Same content -> byte-identical WAV (the dither is seeded, not free-running).
+    assert (drums.render_loop(p, kit, 120, humanize=0.0)
+            == drums.render_loop(p, kit, 120, humanize=0.0))
+    # And digital silence is never dithered into hiss.
+    pcm = _frames(drums.render_loop(p, kit, 120, volume=0.0))
+    assert int(np.abs(pcm).max()) == 0
+
+
+def test_soft_limit_tames_peaks_without_ducking_the_body():
+    quiet = np.full(1000, 0.5, dtype=np.float32)
+    spike = quiet.copy()
+    spike[500] = 2.0                                    # one hot transient
+    out = drums._soft_limit(spike)
+    assert np.allclose(out[:400], 0.5, atol=1e-6)       # the body is untouched...
+    assert 0.8 < out[500] <= 1.0                        # ...the peak is squashed into range
+    assert np.array_equal(drums._soft_limit(quiet), quiet)   # under unity: no-op
