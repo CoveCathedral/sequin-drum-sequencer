@@ -92,8 +92,8 @@ like. The complete guide to sample libraries and kit folders is in
 
 Right under the top of the Sequin tab:
 
-- **Kit** — a dropdown: the built-in **synth kit** (works with no files), plus any drum-kit
-  folders you've added.
+- **Kit** — a dropdown: the built-in **synth kit** (works with no files — powered by
+  **Spangle**, Sequin's own drum synthesizer), plus any drum-kit folders you've added.
 - **Build Kit…** — make a **new kit from scratch**, part by part. Type a name, pick a part
   (kick, snare, hi-hat, …), then choose **Synth** (the built-in voice) or any kit you have
   to borrow a sample from — arrow through the samples to hear each one. Parts you leave on

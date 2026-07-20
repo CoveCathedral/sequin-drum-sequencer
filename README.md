@@ -38,7 +38,9 @@ pip install -e .[dev]     # or: pip install -e .
 python -m sequin          # or run Sequin.bat on Windows
 ```
 
-Kits live under `Samples/<KitName>/<ROLE>/*.wav` (see `docs/drum-kits.md`). Third-party
+The built-in kit is synthesized by **Spangle**, Sequin's own drum synth (see
+`docs/spangle.md`) — no sample files needed. Kits live under
+`Samples/<KitName>/<ROLE>/*.wav` (see `docs/drum-kits.md`). Third-party
 sample kits are **not** redistributed here — only the explanatory `Samples/README.md` is
 tracked.
 
