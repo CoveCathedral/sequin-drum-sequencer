@@ -459,25 +459,60 @@ def synth_808(rate: int = RATE) -> "np.ndarray":
     return _norm(_attack(x, rate, 0.006))
 
 
-def synth_snare(rate: int = RATE) -> "np.ndarray":
-    """Coupled membrane modes (detuned pairs that beat) + TWO wire layers: a fast HF snap
-    and a mid buzz that outlives the body.  One flat noise burst is the classic mistake."""
-    t = _t(0.32, rate)
+def synth_snare(rate: int = RATE, f0: float = 195.0, body_mix: float = 0.55,
+                crack_mix: float = 0.95, buzz_tau: float = 0.130,
+                bright: float = 1.0) -> "np.ndarray":
+    """A snare that is a DRUM, not a drum machine.
+
+    The 80s-toy sound is architectural: pure sine modes + a separate smooth noise layer.
+    A real snare couples them — the wires rattle AGAINST the moving head — so here the
+    buzz is (a) filtered through the drum's own resonant bands, (b) amplitude-modulated
+    by the body's motion, and (c) roughened by a slow random flutter (wires bounce
+    irregularly).  The first ~8 ms is a broadband CRACK, not a tone, and the tonal body
+    is heavily damped: a snare's pitch is a short 'donk' under the noise, never a note
+    that sings.  The keyword knobs give tight/fat/crisp voicings from one model.
+    """
+    t = _t(0.30, rate)
+    rng_phase = np.random.default_rng(105)
+
+    # Tonal body: coupled beating pairs, DAMPED hard — the fundamental dies in ~55 ms.
     body = np.zeros(len(t), dtype=np.float64)
-    modes = ((185.0, 1.00, 0.090), (189.0, 0.90, 0.090),   # (0,1) coupled pair — beats
-             (294.0, 0.70, 0.200), (298.0, 0.63, 0.200),   # (1,1) pair
-             (396.0, 0.50, 0.170), (426.0, 0.40, 0.150), (490.0, 0.30, 0.130),
-             (540.0, 0.25, 0.110), (585.0, 0.15, 0.090), (648.0, 0.15, 0.090))
-    rng = np.random.default_rng(105)
+    ratio = f0 / 195.0
+    modes = ((f0, 1.00, 0.055), (f0 * 1.031, 0.85, 0.055),
+             (285.0 * ratio, 0.55, 0.090), (291.0 * ratio, 0.48, 0.090),
+             (342.0 * ratio, 0.35, 0.070), (405.0 * ratio, 0.25, 0.060),
+             (513.0 * ratio, 0.15, 0.045))
+    bend = 1.0 + 0.03 * np.exp(-t / 0.010)            # a hair of stick 'give'
     for f, a, tau in modes:
-        body += a * np.sin(2 * np.pi * f * t + rng.uniform(0, 2 * np.pi)) * np.exp(-t / tau)
-    snap = _shaped_noise(106, t, rate, lo=2000.0, hi=8000.0, tau=0.055)
-    buzz = _shaped_noise(107, t, rate, lo=1000.0, hi=6000.0, tau=0.220,
-                         peak_hz=2500.0, peak_gain=2.0)
-    x = 0.9 * body + 1.0 * (0.5 * snap + 0.5 * buzz)
-    x = np.tanh(1.2 * x)
-    x = _fft_shape(x, rate, lo=120.0)
-    return _norm(_attack(x, rate, 0.0007))
+        ph = 2 * np.pi * np.cumsum(f * bend) / rate + rng_phase.uniform(0, 2 * np.pi)
+        body += a * np.sin(ph) * np.exp(-t / tau)
+
+    # The crack: the stick-and-both-heads impulse — broadband, hot, over in ~8 ms.
+    crack = _shaped_noise(140, t, rate, lo=500.0, hi=8000.0 * bright, tau=0.006)
+
+    # Wire buzz: noise sent through the DRUM (its resonant bands), driven by the head.
+    rng = np.random.default_rng(141)
+    raw = rng.uniform(-1.0, 1.0, len(t))
+    buzz = (_fft_shape(raw, rate, lo=800.0, hi=3500.0, peak_hz=1300.0, peak_gain=2.5, peak_q=1.2)
+            + _fft_shape(raw, rate, lo=1800.0, hi=6500.0, peak_hz=2600.0, peak_gain=2.5, peak_q=1.2)
+            + 0.7 * bright * _fft_shape(raw, rate, lo=3000.0, hi=9000.0, peak_hz=4200.0,
+                                        peak_gain=2.0, peak_q=1.2))
+    head = np.abs(body)                                # the head's motion drives the wires
+    head = _fft_shape(head, rate, hi=600.0)
+    head /= max(1e-9, float(np.max(np.abs(head))))
+    flutter = _fft_shape(rng.uniform(-1.0, 1.0, len(t)), rate, hi=180.0)
+    flutter /= max(1e-9, float(np.max(np.abs(flutter))))
+    buzz *= (1.0 + 0.8 * head) * (1.0 + 0.35 * flutter)   # coupled, irregular rattle
+    buzz *= np.exp(-t / buzz_tau)
+    buzz /= max(1e-9, float(np.max(np.abs(buzz))))
+
+    # Wire snap: the bright instant of contact, on top of the buzz.
+    snap = _shaped_noise(142, t, rate, lo=3000.0 * bright, tau=0.030)
+
+    x = crack_mix * crack + body_mix * body + 0.95 * buzz + 0.55 * snap
+    x = np.tanh(1.15 * x / max(1e-9, float(np.max(np.abs(x)))))
+    x = _fft_shape(x, rate, lo=130.0)
+    return _norm(_attack(x, rate, 0.0006))
 
 
 def synth_rimshot(rate: int = RATE) -> "np.ndarray":
