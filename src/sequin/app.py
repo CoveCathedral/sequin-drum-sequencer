@@ -28,6 +28,7 @@ from pathlib import Path
 
 import wx
 
+from . import __version__
 from ._bundle import bundle_root
 from .config import AppSettings
 from .ui import speech, theme
@@ -156,7 +157,7 @@ class SequinFrame(wx.Frame):
 
     def _on_about(self, event) -> None:
         wx.MessageBox(
-            "Sequin — the accessible step sequencer\n\n"
+            f"Sequin {__version__} — the accessible step sequencer\n\n"
             "A screen-reader-first, keyboard-only drum machine and step sequencer for "
             "blind and low-vision musicians (built and tested with NVDA). Designed "
             "non-visually from the ground up — the spoken tracker grid is the interface.\n\n"

@@ -1331,3 +1331,37 @@ def test_line_kit_inherits_layers_for_follow_global_lines(tmp_path):
     lines = [dict(ps.make_line("kick"), steps=[0])]
     lk = ps.build_line_kit(lines, tmp_path, base_kit=base)
     assert lines[0]["id"] in lk.variants or "kick" in lk.variants
+
+
+def test_missing_tom_seats_derive_from_the_kits_own_tom(tmp_path):
+    # A kit with ONE tom folder still plays a full descending five-tom run — the missing
+    # seats are pitch-shifted from the kit's own tom, not collapsed onto one drum and not
+    # handed to the synth. (This was "we're only getting one tom in fills".)
+    d = tmp_path / "TOM3"
+    d.mkdir()
+    _write_int16_wav(d / "tom.wav", 0.6 * np.sin(2 * np.pi * 140.0 * np.arange(11025) / 44100))
+    kit = drums.load_kit_from_folder(tmp_path)
+    hz = {}
+    for r in drums.TOM_ROLES:
+        v = kit.voices.get(r)
+        assert v is not None, r                      # in voices proper, not fallback
+        hz[r] = float(np.argmax(np.abs(np.fft.rfft(v)))) * 44100 / len(v)
+    assert all(hz[a] > hz[b] for a, b in zip(drums.TOM_ROLES, drums.TOM_ROLES[1:]))
+    # A kit with NO toms keeps the honest synth fallback instead of inventing seats.
+    e = tmp_path / "empty"
+    (e / "KICK").mkdir(parents=True)
+    _write_int16_wav(e / "KICK" / "k.wav", 0.5 * np.sin(np.arange(2000) / 9))
+    bare = drums.load_kit_from_folder(e)
+    assert all(r not in bare.voices for r in drums.TOM_ROLES)
+
+
+def test_groove_bodies_use_the_extended_toms():
+    # The five-tom palette must live outside fills too: a healthy share of the NON-fill
+    # patterns in kit idioms carry tom colour.
+    lib = drums.build_pattern_library()
+    bodies = [p for p in lib if not p.name.endswith("fill")
+              and any(r in p.hits for r in ("tom1", "tom2", "tom4", "tom5"))]
+    assert len(bodies) >= 15
+    # ...and only in genres whose profile allows a tom run.
+    for p in bodies:
+        assert drums.GENRE_FEEL[drums._genre_of(p.name)]["tom_run"], p.name

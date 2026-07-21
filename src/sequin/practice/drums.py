@@ -1166,6 +1166,24 @@ def load_kit_from_folder(path, rate: int = RATE, choices: dict | None = None) ->
                     voices[role] = load_sample(wav, rate)
                 except Exception:  # noqa: BLE001
                     continue
+    # Tom coverage: kits rarely ship all five tom seats (one "Toms" folder is typical),
+    # which collapsed fill descents onto a single drum. Derive the missing seats from the
+    # kit's own nearest tom, pitch-shifted by the ladder spacing (~4 semitones per seat,
+    # matching the synth ladder 220/175/138/110/87 Hz), so runs stay in the KIT's timbre.
+    # Never overrides a real folder; a kit with no toms at all keeps the synth fallback.
+    have = [r for r in TOM_ROLES if r in voices]
+    if have and len(have) < len(TOM_ROLES):
+        seat = {r: i for i, r in enumerate(TOM_ROLES)}
+        for r in TOM_ROLES:
+            if r in voices:
+                continue
+            near = min(have, key=lambda a: abs(seat[a] - seat[r]))
+            shift = (seat[near] - seat[r]) * 4.0
+            voices[r] = resample_pitch(voices[near], shift)
+            if near in variants:
+                variants[r] = {lv: [resample_pitch(v, shift) for v in pool]
+                               for lv, pool in variants[near].items()}
+
     # Every sample kit answers missing roles with the synth kit — a percussion-only pack
     # must still play a Rock groove's kick/snare/hihat, not go silent (see DrumKit.voice).
     if np is None:
@@ -1852,6 +1870,16 @@ def _generate_variation(base: Pattern, seed: int, with_fill: bool, name: str) ->
     if rng.random() < 0.4:  # light percussion sprinkle
         p.hits["perc"] = sorted(rng.sample(range(total), k=rng.randint(1, 3)))
 
+    prof = GENRE_FEEL.get(_genre_of(name), {})
+    if prof.get("tom_run") and rng.random() < 0.35:
+        # Occasional tom colour in the BODY (kit idioms only): an accent drum on an
+        # off-snare step, so the five-tom palette lives outside the fills too.
+        options = [s for s in range(total) if s not in set(p.hits.get("snare", []))]
+        if options:
+            for s2 in rng.sample(options, k=min(len(options), rng.randint(1, 2))):
+                role = TOM_ROLES[rng.randrange(len(TOM_ROLES))]
+                p.hits[role] = sorted(set(p.hits.get(role, [])) | {s2})
+
     if with_fill:
         # Fill: clear the last beat(s) of bar 2 and run snare/tom through it, with a
         # crash landing on the loop restart. Sized from the meter, so it always fits.
@@ -1860,7 +1888,6 @@ def _generate_variation(base: Pattern, seed: int, with_fill: bool, name: str) ->
         for role in ("snare", "hihat", "openhat", "clap", "tom", "perc"):
             if role in p.hits:
                 p.hits[role] = [s for s in p.hits[role] if s < start]
-        prof = GENRE_FEEL.get(_genre_of(name), {})
         # A kit player turns a fill DOWN the toms; a snare-only idiom (punk, second line,
         # trap, most electronic) keeps it on the snare. TOM_ROLES is already high-to-low.
         tom_run = prof.get("tom_run") and len(TOM_ROLES) > 1

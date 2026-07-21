@@ -12,3 +12,5 @@ Layers:
 - ``sequin.config`` — a small persistent settings store.
 - ``sequin.app`` — the standalone ``SequinFrame`` window and ``main()`` entry point.
 """
+
+__version__ = "1.0.0"
