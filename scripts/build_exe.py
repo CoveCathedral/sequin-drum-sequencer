@@ -11,6 +11,7 @@ audio); a user adds kits via Import or by dropping a Samples/ folder next to Seq
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +28,11 @@ def main() -> int:
         cwd=ROOT,
     )
     if result.returncode == 0:
-        print(f"\nBuilt: {ROOT / 'dist' / 'Sequin' / 'Sequin.exe'}")
+        # The plain-text setup readme sits beside Sequin.exe so it's the first thing a user
+        # finds on opening the folder, and can never get separated from the app.
+        out = ROOT / "dist" / "Sequin"
+        shutil.copy2(ROOT / "packaging" / "README.txt", out / "README.txt")
+        print(f"\nBuilt: {out / 'Sequin.exe'}")
         print("Zip the dist/Sequin folder to share it.")
     return result.returncode
 
